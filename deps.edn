@@ -1,0 +1,19 @@
+{:deps
+ {org.clojure/clojure           {:mvn/version "1.12.3"}
+  io.github.tonsky/clojure-plus {:mvn/version "1.7.0"}
+  org.duckdb/duckdb_jdbc        {:mvn/version "1.4.2.0"}
+  ring/ring-core                {:mvn/version "1.15.3"}}
+ :aliases
+ {:dev
+  {:extra-paths ["dev" "test"]
+   :extra-deps
+   {io.github.tonsky/clj-reload {:mvn/version "1.0.0"}}
+   :jvm-opts ["-ea"
+              "-Dclojure.main.report=stderr"
+              "-Duser.language=en"
+              "-Duser.country=US"
+              "-Dfile.encoding=UTF-8"
+              "-Djdk.attach.allowAttachSelf"
+              "-XX:+UnlockDiagnosticVMOptions"
+              "-XX:+DebugNonSafepoints"
+              "-XX:+EnableDynamicAgentLoading"]}}}
