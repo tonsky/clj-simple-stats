@@ -1,0 +1,14 @@
+#!/bin/bash
+set -o errexit -o nounset -o pipefail
+
+# Get Java version
+java_version=$(java -version 2>&1 | head -n 1 | cut -d'"' -f2 | cut -d'.' -f1)
+
+# Build Java options based on version
+opts=""
+
+if [ "$java_version" -ge 24 ]; then
+  opts="$opts -J--enable-native-access=ALL-UNNAMED"
+fi
+
+echo "$opts"

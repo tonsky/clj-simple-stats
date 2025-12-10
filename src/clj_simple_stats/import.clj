@@ -2,15 +2,17 @@
   (:require
    [clj-simple-stats.analyzer :as analyzer]
    [clj-simple-stats.core :as core]
+   [clojure.data.csv :as csv]
    [clojure.java.io :as io]
    [clojure.string :as str])
   (:import
+   [java.io File]
    [java.nio ByteBuffer]
    [java.security MessageDigest]
    [java.time LocalDate LocalDateTime LocalTime]
    [java.time.format DateTimeFormatter]
    [java.util UUID]
-   [org.duckdb DuckDBConnection]))
+   [org.duckdb DuckDBAppender DuckDBConnection]))
 
 (defn update-to-new [db-in db-out]
   (core/with-conn [conn-in db-in]
@@ -69,72 +71,85 @@
     "grumpy_data/stats_2025_12-09.duckdb"
     "grumpy_data/stats_2025_12-09_domain.duckdb"))
 
-
 (def ^DateTimeFormatter instant-formatter
   (DateTimeFormatter/ofPattern "dd/MMM/yyyy:HH:mm:ss X"))
 
-(defn parse-instant [s]
+(defn parse-instant ^LocalDateTime [s]
   (LocalDateTime/parse s instant-formatter))
 
 (defn parse-line-nginx [line]
-  (let [[ip _ user time request status bytes referrer user-agent]
-        (->> line
-          (re-seq #"-|\"-\"|\"([^\"]+)\"|\[([^\]]+)\]|([^\"\[\] ]+)")
-          (map next)
-          (map (fn [[a b c]] (or a b c))))
-        [method url protocol] (str/split request #"\s+")]
-    (when url
-      (let [[_ path query fragment] (re-matches #"([^?#]+)(?:\?([^#]+)?)?(?:#(.+)?)?" url)]
-        {:ip         ip
-         :user       user
-         :time       (parse-instant time)
-         :request    request
-         :method     method
-         :url        url
-         :path       path
-         :query      query
-         :fragment   fragment
-         :protocol   protocol
-         :status     (some-> status parse-long)
-         :bytes      (some-> bytes parse-long)
-         :referrer   referrer
-         :user-agent user-agent}))))
+  (try
+    (let [[ip _ user time request status bytes referrer user-agent]
+          (->> line
+            (re-seq #"-|\"-\"|\"([^\"]+)\"|\[([^\]]+)\]|([^\"\[\] ]+)")
+            (map next)
+            (map (fn [[a b c]] (or a b c))))
+          [method url protocol] (some-> request (str/split #"\s+"))]
+      (when (not (some str/blank? [method url protocol]))
+        (let [[_ path query fragment] (re-matches #"([^?#]+)(?:\?([^#]+)?)?(?:#(.+)?)?" url)
+              inst (parse-instant time)]
+          {:ip         ip
+           :user       user
+           :date       (.toLocalDate inst)
+           :time       (.toLocalTime inst)
+           :request    request
+           :method     method
+           :url        url
+           :path       path
+           :query      query
+           :fragment   fragment
+           :protocol   protocol
+           :status     (some-> status parse-long)
+           :bytes      (some-> bytes parse-long)
+           :referrer   referrer
+           :user-agent user-agent
+           :type       (when (str/includes? path "atom.xml")
+                         "feed")})))
+    (catch Exception e
+      (println (ex-message e) (pr-str line))
+      nil)))
 
 (comment
-  (with-open [rdr (io/reader (io/file "/Users/tonsky/Downloads/tonsky_logs/access.log.1"))]
-    (->> (line-seq rdr)
-      (map parse-line-nginx)
-      #_(filter #(= 200 (:status %)))
-      (filter #(= "https://tonsky.me/" (:referrer %)))
-      #_(map :url)
-      #_(set)
-      (take 100)
-      (doall))))
+  (parse-line-nginx "39.62.10.126 - - [17/Sep/2023:04:46:33 +0000] \"-\" 400 166 \"-\" \"-\""))
 
-#_(defn convert-nginx [from to]
-  (with-open [rdr (io/reader (io/file from))
-              wrt (io/writer (io/file to))]
-    (.write wrt "date\ttime\tpath\tquery\tip\tuser-agent\treferrer\n")
-    (doseq [:let [lines (keep parse-line-nginx (line-seq rdr))]
-            {:keys [time path query fragment ip user-agent referrer status]} lines
-            :when (= 200 status)]
-      (.write wrt
-        (str
-          (.format date-formatter time) "\t"
-          (.format time-formatter time) "\t"
-          path       "\t"
-          query      "\t"
-          ip         "\t"
-          user-agent "\t"
-          referrer   "\n")))))
+(defn valid-line? [{:keys [status time path ip user-agent]}]
+  (and time
+    (= 200 status)
+    (not (some str/blank? [path ip user-agent]))
+    (not (re-find #"(?i)/static|\.svg|\.png|\.ico|\.jpe?g|\.mp4|\.gif|\.php|\.txt|\.webp|\.woff|\.md|\.DS_Store|\.css|\.js" path))
+    (not (#{"/forbidden" "/robots.txt"} path))))
+
+(def t0
+  (System/currentTimeMillis))
+
+(defn dt []
+  (- (System/currentTimeMillis) t0))
+
+(defn nginx->csv [^File input]
+  (let [name   (.getName input)
+        output (io/file (str (File/.getPath input) ".csv"))]
+    (if (.exists output)
+      (println "Skipping" name)
+      (with-open [rdr (io/reader input)]
+        (let [lines (->> (line-seq rdr)
+                      (keep parse-line-nginx)
+                      (filter valid-line?)
+                      (map analyzer/analyze)
+                      (map (juxt :date :time :path :query :ip :user-agent :referrer :type :agent :os :ref-domain :mult :set-cookie :uniq)))]
+          (with-open [writer (io/writer output)]
+            (csv/write-csv writer
+              (cons ["date" "time" "path" "query" "ip" "user_agent" "referrer" "type" "agent" "os" "ref_domain" "mult" "set_cookie" "uniq"]
+                lines))))
+        (println (format "%,d ms %s" (dt) name))))))
 
 (comment
-  (convert-nginx "grumpy_data/stats/grumpy_access.log" "grumpy_data/stats/2023-08.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.1" "grumpy_data/stats/2023-07.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.2" "grumpy_data/stats/2023-06.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.3" "grumpy_data/stats/2023-05.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.4" "grumpy_data/stats/2023-04.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.5" "grumpy_data/stats/2023-03.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.6" "grumpy_data/stats/2023-02.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.7" "grumpy_data/stats/2023-01.csv")
-  (convert-nginx "grumpy_data/stats/grumpy_access.log.8" "grumpy_data/stats/2022-12.csv"))
+  (doseq [:let [_ (alter-var-root #'t0 (constantly (System/currentTimeMillis)))]
+          file (->> (file-seq (io/file "/Users/tonsky/Downloads/tonsky_logs/"))
+                 (filter #(re-find #"site_access" (File/.getPath %)))
+                 (remove #(re-find #"\.csv" (File/.getName %)))
+                 (sort-by File/.getPath))]
+    (nginx->csv file))
+
+  (.delete (io/file "/Users/tonsky/Downloads/tonsky_logs/stats.duckdb"))
+  (core/with-conn [conn "/Users/tonsky/Downloads/tonsky_logs/stats.duckdb"] {:ttl 0}
+    (core/init-db! conn)))
