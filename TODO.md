@@ -1,0 +1,2 @@
+- [x] Average RSS readers count
+- [x] Add `:dash-perms-fn` to `opts`

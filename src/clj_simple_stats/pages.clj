@@ -1,5 +1,6 @@
 (ns clj-simple-stats.pages
   (:require
+   [clojure.math :as math]
    [clojure.string :as str]
    [ring.middleware.params :as params])
   (:import
@@ -271,6 +272,11 @@
     (* m)
     int))
 
+(defn average [xs]
+  (-> (reduce + 0 xs)
+    (/ (max 1 (count xs)))
+    math/round))
+
 (def bar-w
   3)
 
@@ -299,7 +305,7 @@
         today (LocalDate/now)]
     (if (or (nil? from) (nil? to))
       (let [from (.with (LocalDate/now) (TemporalAdjusters/firstDayOfYear))
-            to   today]
+            to   (.with (LocalDate/now) (TemporalAdjusters/lastDayOfYear))]
         {:status  302
          :headers {"Location" (str "?" (querystring (assoc params "from" from "to" to)))}})
       (let [from-date (LocalDate/parse from)
@@ -400,10 +406,14 @@
 
           (doseq [[type title] [[:browser "Unique visitors"]
                                 [:feed "RSS Readers"]
-                                [:bot "Bots"]]
+                                [:bot "Scrapers"]]
                   :let [date->cnt (get data type)]
                   :when (not (empty? date->cnt))]
-            (append (format "<h1>%s: %,d</h1>" title (get totals type)))
+            (case type
+              :feed
+              (append (format "<h1>%s: ~%,d / day</h1>" title (average (vals date->cnt))))
+              #_else
+              (append (format "<h1>%s: %,d</h1>" title (get totals type))))
             (append "<div class=graph_outer>")
 
             ;; .graph
@@ -487,9 +497,9 @@
           (tbl "Queries"     (top-10      conn "query"      (str "type = 'browser' AND " where)) {:param "query"})
           (tbl "Referrers"   (top-10      conn "ref_domain" (str "type = 'browser' AND " where)) {:param "ref_domain", :href-fn #(str "https://" %)})
           (tbl "Browsers"    (top-10-uniq conn "agent"      (str "type = 'browser' AND " where)) {:param "agent"})
-          (tbl "OSes"        (top-10-uniq conn "os"         (str "type = 'browser' AND " where)) {:param "os"})
+          #_(tbl "OSes"        (top-10-uniq conn "os"         (str "type = 'browser' AND " where)) {:param "os"})
           (tbl "RSS Readers" (top-10-uniq conn "agent"      (str "type = 'feed'    AND " where)) {:param "agent"})
-          (tbl "Bots"        (top-10-uniq conn "agent"      (str "type = 'bot'     AND " where)) {:param "agent"})
+          (tbl "Scrapers"    (top-10-uniq conn "agent"      (str "type = 'bot'     AND " where)) {:param "agent"})
           (append "</div>"))
 
         (append "</body>")
