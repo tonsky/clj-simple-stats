@@ -4,14 +4,14 @@ This library was born out of a desire to have a basic understanding of my web pr
 
 `clj-simple-stats`, as the name suggests, is trivial to set up:
 
-1. Add `io.github.tonsky/clj-simple-stats {:mvn/version "0.1.0"}` to `deps.edn`
+1. Add `io.github.tonsky/clj-simple-stats {:mvn/version "1.0.0"}` to `deps.edn`.
 2. Add `clj-simple-stats.core/wrap-stats` anywhere in your middleware stack.
 
 That’s it! There’s no step 3.
 
 - All the visits that go through that middleware will be counted automatically.
 - Data will be stored to `clj_simple_stats.duckdb` in the current dir.
-- You’ll get a dashboard at `/stats` That looks like this:
+- You’ll get a dashboard at `/stats` that looks like this:
 
 ![](./docs/dashboard.webp)
 
