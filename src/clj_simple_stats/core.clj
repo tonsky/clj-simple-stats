@@ -308,11 +308,18 @@
 (defn wrap-render-stats
   ([handler]
    (wrap-render-stats handler {}))
-  ([handler {:keys [uri] :or {uri default-uri} :as opts}]
+  ([handler {:keys [uri dash-perms-fn]
+             :or {uri default-uri
+                  dash-perms-fn (fn [_] true)}
+             :as opts}]
    (fn [req]
      (cond
        (= uri (:uri req))
-       (render-stats opts req)
+       (if (dash-perms-fn req)
+         (render-stats opts req)
+         {:status  401
+          :headers {"content-type" "text/plain"}
+          :body    "Unauthorized"})
 
        (= (str uri "/favicon.ico") (:uri req))
        (response/resource-response "clj_simple_stats/favicon.ico")

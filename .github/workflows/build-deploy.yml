@@ -21,7 +21,7 @@ jobs:
       CLOJARS_TOKEN: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.1
 
       - run: |
           echo "JAVA_HOME=$JAVA_HOME_21_X64" >> $GITHUB_ENV
@@ -47,7 +47,7 @@ jobs:
         run: |
           lein deploy clojars
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: jar
           path: 'target/*.jar'

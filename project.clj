@@ -3,7 +3,7 @@
   :license     {:name "MIT" :url "https://github.com/tonsky/clj-simple-stats/blob/master/LICENSE"}
   :url         "https://github.com/tonsky/clj-simple-stats"
   :dependencies
-  [[org.clojure/clojure "1.12.3"]]
+  [[org.clojure/clojure "1.12.4"]]
   :deploy-repositories
   {"clojars"
    {:url "https://clojars.org/repo"

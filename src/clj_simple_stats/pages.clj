@@ -196,15 +196,15 @@
    .tables { display: flex; flex-direction: row; flex-wrap: wrap; column-gap: 20px; }
    .table_outer { }
 
-   table { font-size: 13px; font-feature-settings: 'tnum' 1; background: #FFF; padding: 6px 10px; border-radius: 6px; border-spacing: 4px; width: 400px; }
+   table { font-size: 13px; background: #FFF; padding: 6px 10px; border-radius: 6px; border-spacing: 4px; width: 365px; }
    th, td { padding: 0; }
-   th { text-align: left; font-weight: normal; width: 245px; position: relative; }
+   th { text-align: left; font-weight: normal; width: 220px; position: relative; }
    th > div { height: 20px; background-color: #B9E5FE; border-radius: 2px; }
-   th > span, th > a { height: 20px; line-height: 20px; position: absolute; top: 0; left: 4px; width: calc(250px - 4px); overflow: hidden; text-overflow: ellipsis;  }
+   th > span, th > a { height: 20px; line-height: 20px; position: absolute; top: 0; left: 4px; width: calc(220px - 4px); overflow: hidden; text-overflow: ellipsis;  }
    td.f { text-align: left; width: 15px; }
    td.f > a { opacity: 0.25; text-decoration: none; }
    td.f > a:hover { opacity: 1; }
-   td { text-align: right; width: 50px; }
+   td { font-feature-settings: 'tnum' 1; text-align: right; width: 45px; }
    .pct { color: #00000070; }")
 
 (def script
