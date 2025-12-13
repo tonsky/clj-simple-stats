@@ -44,6 +44,11 @@ These default values are used; feel free to override:
 
 Finally, `wrap-render-stats` middleware checks if `(= (:uri opts) (:uri req))` and then calls `render-stats` handler. If you prefer to use your own router, feel free to use `render-stats` handler directly.
 
+## F.A.Q.
+
+Q: Will this work with static websites? E.g. served fully by Nginx?
+A: Unfortunately, no. This is designed to sit in your Ring middleware stack.
+
 ## In the wild
 
 You can see live deployments at
