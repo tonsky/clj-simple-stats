@@ -49,6 +49,9 @@ Finally, `wrap-render-stats` middleware checks if `(= (:uri opts) (:uri req))` a
 Q: Will this work with static websites? E.g. served fully by Nginx?
 A: Unfortunately, no. This is designed to sit in your Ring middleware stack.
 
+Q: How can I select time intervals?
+A: Select whole years at the top of the page. Select whole months by clicking their labels in the graph. Everything else only by modifying URL params. Might change later.
+
 ## In the wild
 
 You can see live deployments at
