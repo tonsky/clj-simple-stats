@@ -14,8 +14,8 @@ div.filter > a { display: inline-block; padding: 3px 6px; margin: -3px -6px -3px
 div.filter > a:hover { background: #CCCCD4; }
 
 h1 { font-size: 16px; margin: 20px 0 8px 0; }
-.graph_outer { background: #FFF; border-radius: 6px; padding: 10px var(--padding-graph_outer) 0; display: flex; width: max-content; max-width: calc(100vw - var(--padding-body) * 2); }
-.graph_scroll { max-width: calc(100vw - var(--padding-body) * 2 - var(--padding-graph_outer) * 2 - var(--width-graph_legend)); overflow-x: auto; padding-bottom: 30px; margin-bottom: -20px; position: relative; }
+.graph_outer { background: #FFF; border-radius: 6px; padding: 10px var(--padding-graph_outer) 0; display: flex; width: max-content; max-width: calc(100vw - var(--padding-body) * 2); position: relative; }
+.graph_scroll { max-width: calc(100vw - var(--padding-body) * 2 - var(--padding-graph_outer) * 2 - var(--width-graph_legend)); overflow-x: auto; padding-bottom: 30px; margin-bottom: -20px; }
 .graph { display: block; }
 .graph > g > rect { fill: #5FC7FF40; }
 .graph > g > rect.i { fill: transparent; }
@@ -29,7 +29,7 @@ h1 { font-size: 16px; margin: 20px 0 8px 0; }
 .graph > a:hover { fill: #000000; }
 .graph_legend { width: var(--width-graph_legend); cursor: default; }
 .graph_legend > text { font-size: 10px; fill: #00000070; }
-.graph_hover { font-size: 10px; font-feature-settings: 'tnum' 1; color: #a35249; position: absolute;background: #ffe1dc; padding: 2px 6px; border-radius: 2px; white-space: nowrap; cursor: default; }
+.graph_hover { font-size: 10px; font-feature-settings: 'tnum' 1; color: #a35249; position: absolute; top: 2px; background: #ffe1dc; padding: 2px 6px; border-radius: 2px; white-space: nowrap; cursor: default; }
 
 .tables { display: flex; flex-direction: row; flex-wrap: wrap; column-gap: 20px; }
 .table_outer { }

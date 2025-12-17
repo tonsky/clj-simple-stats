@@ -2,3 +2,5 @@
 - [x] Add `:dash-perms-fn` to `opts`
 - [x] Use Inter font in Dashboard
 - [x] Hover over any place in the graph
+- [x] Click to filter by 1 day
+- [ ] Better dates navigation

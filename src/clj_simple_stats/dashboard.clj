@@ -348,11 +348,11 @@
               (when val
                 (let [bar-h  (bar-h val)
                       data-v (format "%,d" val)
-                      data-d (.format date-time-formatter date)
+                      data-d (str date)
                       x      (* idx bar-w)
                       y      (- graph-h bar-h -10)]
                   (append "<g data-v='" data-v "' data-d='" data-d "'>")
-                  (append "<rect class=i x=" x " y=8 width=" bar-w " height=" (+ graph-h 2) " />")
+                  (append "<rect class=i x=" x " y=0 width=" bar-w " height=" (+ graph-h 10) " />")
                   (append "<rect x=" x " y=" (- y 2) " width=" bar-w " height=" (+ bar-h 2) " />")
                   (append "<line x1=" x " y1=" (- y 1) " x2=" (+ x bar-w) " y2=" (- y 1) " />")
                   (append "</g>")))
