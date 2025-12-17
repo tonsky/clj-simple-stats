@@ -1,7 +1,7 @@
 (ns clj-simple-stats.core
   (:require
    [clj-simple-stats.analyzer :as analyzer]
-   [clj-simple-stats.pages :as pages]
+   [clj-simple-stats.dashboard :as dashboard]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [ring.middleware.cookies :as cookies]
@@ -303,7 +303,7 @@
    (render-stats {} req))
   ([{:keys [db-path] :or {db-path default-db-path}} req]
    (with-conn [conn db-path]
-     (pages/page conn req))))
+     (dashboard/page conn req))))
 
 (defn wrap-render-stats
   ([handler]

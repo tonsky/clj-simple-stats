@@ -1,4 +1,4 @@
-(ns clj-simple-stats.pages
+(ns clj-simple-stats.dashboard
   (:require
    [clojure.math :as math]
    [clojure.string :as str]
@@ -163,7 +163,7 @@
 
 (def styles
   ":root { --padding-body: 20px; --padding-graph_outer: 10px; --width-graph_legend: 20px; }
-   body { margin: 0; padding: 20px var(--padding-body); background: #EDEDF2; }
+   body { margin: 0; padding: 20px var(--padding-body); background: #EDEDF2; font-family: 'Inter', sans-serif; font-optical-sizing: auto; }
    a { color: inherit; text-decoration-color: #00000040; }
    a:hover { text-decoration-color: #000000; }
 
@@ -326,6 +326,8 @@
         (append "<head>")
         (append "<meta charset=\"utf-8\">")
         (append "<link rel='icon' href='" (:uri req) "/favicon.ico' sizes='32x32'>")
+        (append "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>")
+        (append "<link href=\"https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,100..900&display=swap\" rel=\"stylesheet\">")
         (append "<style>" styles "</style>")
         (append "<script>" script "</script>")
         (append "</head>")
