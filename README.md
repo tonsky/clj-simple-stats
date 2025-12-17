@@ -4,7 +4,7 @@ This library was born out of a desire to have a basic understanding of my web pr
 
 `clj-simple-stats`, as the name suggests, is trivial to set up:
 
-1. Add `io.github.tonsky/clj-simple-stats {:mvn/version "1.0.0"}` to `deps.edn`.
+1. Add `io.github.tonsky/clj-simple-stats {:mvn/version "1.1.0"}` to `deps.edn`.
 2. Add `clj-simple-stats.core/wrap-stats` anywhere in your middleware stack.
 
 That’s it! There’s no step 3.
