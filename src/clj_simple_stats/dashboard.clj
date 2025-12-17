@@ -1,5 +1,6 @@
 (ns clj-simple-stats.dashboard
   (:require
+   [clojure.java.io :as io]
    [clojure.math :as math]
    [clojure.string :as str]
    [ring.middleware.params :as params])
@@ -161,97 +162,11 @@
     (top-10 conn "query" "type = 'browser'")
     #_(top-10 conn "query" "path = '/search' AND type = 'browser'")))
 
-(def styles
-  ":root { --padding-body: 20px; --padding-graph_outer: 10px; --width-graph_legend: 20px; }
-   body { margin: 0; padding: 20px var(--padding-body); background: #EDEDF2; font-family: 'Inter', sans-serif; font-optical-sizing: auto; }
-   a { color: inherit; text-decoration-color: #00000040; }
-   a:hover { text-decoration-color: #000000; }
+(defn styles []
+  (slurp (io/resource "clj_simple_stats/style.css")))
 
-   .filters { display: flex; gap: 3px; }
-   .filter { display: flex; margin-left: 0px; }
-   .filter { display: inline-block; padding: 3px 6px; text-decoration: none; font-size: 13px; }
-   .filter.in { background: #DDDDE2; }
-   a.filter:hover,
-   a.filter.in:hover { background: #CCCCD4; }
-   div.filter { background: #DDDDE2; }
-   div.filter > a { display: inline-block; padding: 3px 6px; margin: -3px -6px -3px 0; text-decoration: none; }
-   div.filter > a:hover { background: #CCCCD4; }
-
-   h1 { font-size: 16px; margin: 20px 0 8px 0; }
-   .graph_outer { background: #FFF; border-radius: 6px; padding: 10px var(--padding-graph_outer) 0; display: flex; width: max-content; max-width: calc(100vw - var(--padding-body) * 2); position: relative; }
-   .graph_hover { font-size: 10px; font-feature-settings: 'tnum' 1; color: #a35249; position: absolute; left: var(--padding-graph_outer); top: 10px; background: #ffe1dc; padding: 2px 6px; border-radius: 2px; }
-   .graph_scroll { max-width: calc(100vw - var(--padding-body) * 2 - var(--padding-graph_outer) * 2 - var(--width-graph_legend)); overflow-x: auto; padding-bottom: 30px; margin-bottom: -20px; }
-   .graph { display: block; }
-   .graph > g > rect { fill: #d6f1ff; }
-   .graph > g > line { stroke: #0177a1; stroke-width: 2; }
-   .graph > g:hover > rect { fill: #ffe1dc; }
-   .graph > g:hover > line { stroke: #a35249; }
-   .graph > line.hrz  { stroke: #0000000B; stroke-width: 1; }
-   .graph > line.date { stroke: #00000020; stroke-width: 1; }
-   .graph > line.today { stroke: #FF000030; stroke-width: 1; }
-   .graph > a { font-size: 10px; fill: #00000080; }
-   .graph > a:hover { fill: #000000; }
-   .graph_legend { width: var(--width-graph_legend); }
-   .graph_legend > text { font-size: 10px; fill: #00000070; }
-
-   .tables { display: flex; flex-direction: row; flex-wrap: wrap; column-gap: 20px; }
-   .table_outer { }
-
-   table { font-size: 13px; background: #FFF; padding: 6px 10px; border-radius: 6px; border-spacing: 4px; width: 365px; }
-   th, td { padding: 0; }
-   th { text-align: left; font-weight: normal; width: 220px; position: relative; }
-   th > div { height: 20px; background-color: #B9E5FE; border-radius: 2px; }
-   th > span, th > a { height: 20px; line-height: 20px; position: absolute; top: 0; left: 4px; width: calc(220px - 4px); overflow: hidden; text-overflow: ellipsis;  }
-   td.f { text-align: left; width: 15px; }
-   td.f > a { opacity: 0.25; text-decoration: none; }
-   td.f > a:hover { opacity: 1; }
-   td { font-feature-settings: 'tnum' 1; text-align: right; width: 45px; }
-   .pct { color: #00000070; }")
-
-(def script
-  "window.addEventListener('load', () => {
-     const scrollables = document.querySelectorAll('.graph_scroll');
-
-     scrollables.forEach((el) => {
-       el.scrollLeft = el.scrollWidth;
-     });
-
-     scrollables.forEach((el) => {
-       el.addEventListener('scroll', () => {
-         const scrollLeft = el.scrollLeft;
-         scrollables.forEach((other) => {
-           if (other !== el) {
-             other.scrollLeft = scrollLeft;
-           }
-         });
-       });
-     });
-
-     const graphs = document.querySelectorAll('.graph');
-
-     graphs.forEach((graph) => {
-       const graphOuter = graph.closest('.graph_outer');
-       const graphHover = graphOuter.querySelector('.graph_hover');
-
-       graph.addEventListener('mouseover', (e) => {
-         if (e.target.parentNode.tagName === 'g') {
-           const g = e.target.parentNode;
-           const value = g.getAttribute('data-v');
-           const date = g.getAttribute('data-d');
-           if (value && date) {
-             graphHover.style.display = 'block';
-             graphHover.textContent = date + ': ' + value;
-           }
-         } else {
-           graphHover.style.display = 'none';
-         }
-       });
-
-       graph.addEventListener('mouseleave', () => {
-         graphHover.style.display = 'none';
-       });
-     });
-   });")
+(defn script []
+  (slurp (io/resource "clj_simple_stats/script.js")))
 
 (defn format-num [n]
   (->
@@ -328,8 +243,8 @@
         (append "<link rel='icon' href='" (:uri req) "/favicon.ico' sizes='32x32'>")
         (append "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>")
         (append "<link href=\"https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,100..900&display=swap\" rel=\"stylesheet\">")
-        (append "<style>" styles "</style>")
-        (append "<script>" script "</script>")
+        (append "<style>" (styles) "</style>")
+        (append "<script>" (script) "</script>")
         (append "</head>")
         (append "<body>")
 
@@ -419,9 +334,14 @@
             (append "<div class=graph_outer>")
 
             ;; .graph
-            (append "<div class=graph_hover style='display: none'></div>")
             (append "<div class=graph_scroll>")
             (append "<svg class=graph width=" graph-w " height=" (+ graph-h 30) ">")
+
+            ;; horizontal lines
+            (doseq [val (range 0 (inc max-val) hrz-step)
+                    :let [bar-h (bar-h val)]]
+              (append "<line class=hrz x1=0 y1=" (- graph-h bar-h -10) " x2=" graph-w " y2=" (- graph-h bar-h -10) " />"))
+
             (doseq [[idx ^LocalDate date] (map vector (range) dates)
                     :let [val (get date->cnt date)]]
               ;; graph bar
@@ -432,6 +352,7 @@
                       x      (* idx bar-w)
                       y      (- graph-h bar-h -10)]
                   (append "<g data-v='" data-v "' data-d='" data-d "'>")
+                  (append "<rect class=i x=" x " y=8 width=" bar-w " height=" (+ graph-h 2) " />")
                   (append "<rect x=" x " y=" (- y 2) " width=" bar-w " height=" (+ bar-h 2) " />")
                   (append "<line x1=" x " y1=" (- y 1) " x2=" (+ x bar-w) " y2=" (- y 1) " />")
                   (append "</g>")))
@@ -448,10 +369,7 @@
               ;; today
               (when (= today date)
                 (append "<line class=today x1=" (* (+ idx 0.5) bar-w) " y1=0 x2=" (* (+ idx 0.5) bar-w) " y2=" (+ 20 graph-h) " />")))
-            ;; horizontal lines
-            (doseq [val (range 0 (inc max-val) hrz-step)
-                    :let [bar-h (bar-h val)]]
-              (append "<line class=hrz x1=0 y1=" (- graph-h bar-h -10) " x2=" graph-w " y2=" (- graph-h bar-h -10) " />"))
+
             (append "</svg>") ;; .graph
             (append "</div>") ;; .graph_scroll
 
@@ -461,6 +379,8 @@
                     :let [bar-h (bar-h val)]]
               (append "<text x=20 y=" (- graph-h bar-h -13) " text-anchor=end>" (format-num val) "</text>"))
             (append "</svg>") ;; .graph_legend
+
+            (append "<div class=graph_hover style='display: none'></div>")
 
             (append "</div>"))) ;; .graph_outer
 

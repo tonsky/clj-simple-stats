@@ -1,0 +1,46 @@
+:root { --padding-body: 20px; --padding-graph_outer: 10px; --width-graph_legend: 20px; }
+body { margin: 0; padding: 20px var(--padding-body); background: #EDEDF2; font-family: 'Inter', sans-serif; font-optical-sizing: auto; }
+a { color: inherit; text-decoration-color: #00000040; }
+a:hover { text-decoration-color: #000000; }
+
+.filters { display: flex; gap: 3px; }
+.filter { display: flex; margin-left: 0px; }
+.filter { display: inline-block; padding: 3px 6px; text-decoration: none; font-size: 13px; }
+.filter.in { background: #DDDDE2; }
+a.filter:hover,
+a.filter.in:hover { background: #CCCCD4; }
+div.filter { background: #DDDDE2; }
+div.filter > a { display: inline-block; padding: 3px 6px; margin: -3px -6px -3px 0; text-decoration: none; }
+div.filter > a:hover { background: #CCCCD4; }
+
+h1 { font-size: 16px; margin: 20px 0 8px 0; }
+.graph_outer { background: #FFF; border-radius: 6px; padding: 10px var(--padding-graph_outer) 0; display: flex; width: max-content; max-width: calc(100vw - var(--padding-body) * 2); }
+.graph_scroll { max-width: calc(100vw - var(--padding-body) * 2 - var(--padding-graph_outer) * 2 - var(--width-graph_legend)); overflow-x: auto; padding-bottom: 30px; margin-bottom: -20px; position: relative; }
+.graph { display: block; }
+.graph > g > rect { fill: #5FC7FF40; }
+.graph > g > rect.i { fill: transparent; }
+.graph > g > line { stroke: #0177a1; stroke-width: 2; }
+.graph > g:hover > rect { fill: #ff877340; }
+.graph > g:hover > line { stroke: #a35249; }
+.graph > line.hrz  { stroke: #0000000B; stroke-width: 1; }
+.graph > line.date { stroke: #00000020; stroke-width: 1; }
+.graph > line.today { stroke: #FF000030; stroke-width: 1; }
+.graph > a { font-size: 10px; fill: #00000080; }
+.graph > a:hover { fill: #000000; }
+.graph_legend { width: var(--width-graph_legend); cursor: default; }
+.graph_legend > text { font-size: 10px; fill: #00000070; }
+.graph_hover { font-size: 10px; font-feature-settings: 'tnum' 1; color: #a35249; position: absolute;background: #ffe1dc; padding: 2px 6px; border-radius: 2px; white-space: nowrap; cursor: default; }
+
+.tables { display: flex; flex-direction: row; flex-wrap: wrap; column-gap: 20px; }
+.table_outer { }
+
+table { font-size: 13px; background: #FFF; padding: 6px 10px; border-radius: 6px; border-spacing: 4px; width: 365px; }
+th, td { padding: 0; }
+th { text-align: left; font-weight: normal; width: 220px; position: relative; }
+th > div { height: 20px; background-color: #D9F2FF; border-radius: 2px; }
+th > span, th > a { height: 20px; line-height: 20px; position: absolute; top: 0; left: 4px; width: calc(220px - 4px); overflow: hidden; text-overflow: ellipsis;  }
+td.f { text-align: left; width: 15px; }
+td.f > a { opacity: 0.25; text-decoration: none; }
+td.f > a:hover { opacity: 1; }
+td { font-feature-settings: 'tnum' 1; text-align: right; width: 45px; }
+.pct { color: #00000070; }
