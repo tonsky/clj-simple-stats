@@ -1,4 +1,8 @@
-# WIP
+# 1.2.0 - Jan 31, 2025
+
+- Guard against SQL injection
+
+# 1.1.0 - Dec 17, 2025
 
 - Use Inter font in Dashboard
 - Hover over any place in the graph

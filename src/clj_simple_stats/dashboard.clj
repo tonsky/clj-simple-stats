@@ -18,27 +18,40 @@
 (def ^:private ^DateTimeFormatter year-month-formatter
   (DateTimeFormatter/ofPattern "yyyy-MM"))
 
-(defn query [q reduce-fn init ^DuckDBConnection conn]
-  (with-open [stmt (.createStatement conn)
-              rs   (.executeQuery stmt q)]
+(defn filter->where [f]
+  (str/join " AND "
+    (for [[col op _] f]
+      (str col " " op " ?"))))
+
+(defn filter->params [f]
+  (for [[_ _ v] f]
+    v))
+
+(defn query [q params reduce-fn init ^DuckDBConnection conn]
+  (with-open [stmt (doto (.prepareStatement conn q)
+                     (as-> stmt
+                       (doseq [[idx param] (map-indexed vector params)]
+                         (.setObject stmt (inc idx) param))))
+              rs   (.executeQuery stmt)]
     (loop [acc init]
       (if (.next rs)
         (recur (reduce-fn acc rs))
         acc))))
 
-(defn visits-by-type+date [conn where]
+(defn visits-by-type+date [conn f]
   (->
     (query
       (str
         "WITH subq AS (
            SELECT type, date, MAX(mult) AS mult
            FROM stats
-           WHERE " where "
+           WHERE " (filter->where f) "
            GROUP BY type, date, uniq
          )
          FROM subq
          SELECT type, date, SUM(mult) AS cnt
          GROUP BY type, date")
+      (filter->params f)
       (fn [acc ^ResultSet rs]
         (let [type (.getString rs 1)
               date (.getObject rs 2)
@@ -51,18 +64,19 @@
   (clj-simple-stats.core/with-conn [conn "grumpy_data/stats.duckdb"]
     (visits-by-type+date conn "date <= '2025-12-31' AND date >= '2025-01-01'")))
 
-(defn total-uniq [conn where]
+(defn total-uniq [conn f]
   (query
     (str
       "WITH subq AS (
         SELECT type, MAX(mult) AS mult
         FROM stats
-        WHERE " where "
+        WHERE " (filter->where f) "
         GROUP BY type, uniq
       )
       FROM subq
       SELECT type, SUM(mult) AS cnt
       GROUP BY type")
+    (filter->params f)
     (fn [acc ^ResultSet rs]
       (let [type (.getString rs 1)
             cnt  (.getLong rs 2)]
@@ -73,14 +87,14 @@
   (clj-simple-stats.core/with-conn [conn "grumpy_data/stats.duckdb"]
     (total-uniq conn "date <= '2025-12-31' AND date >= '2025-01-01'")))
 
-(defn top-10 [conn what where]
+(defn top-10 [conn what f]
   (->
     (query
       (str
         "WITH base_query AS (
            SELECT " what "
            FROM stats
-           WHERE " where "
+           WHERE " (filter->where f) "
          ),
          top_values AS (
            FROM base_query
@@ -109,19 +123,20 @@
          UNION ALL
          FROM others
          WHERE count > 0")
+      (filter->params f)
       (fn [acc ^ResultSet rs]
         (conj! acc [(.getString rs 1) (.getLong rs 2)]))
       (transient []) conn)
     persistent!))
 
-(defn top-10-uniq [conn what where]
+(defn top-10-uniq [conn what f]
   (->
     (query
       (str
         "WITH base_query AS (
            SELECT ANY_VALUE(" what ") AS " what ", MAX(mult) AS mult
            FROM stats
-           WHERE " where "
+           WHERE " (filter->where f) "
            GROUP BY uniq
          ),
          top_values AS (
@@ -151,6 +166,7 @@
          UNION ALL
          FROM others
          WHERE count > 0")
+      (filter->params f)
       (fn [acc ^ResultSet rs]
         (conj! acc [(.getString rs 1) (.getLong rs 2)]))
       (transient []) conn)
@@ -214,23 +230,32 @@
         (str (name k) "=" (encode-uri-component v)))
       params)))
 
+(def allowed-params
+  #{"from" "to" "path" "query" "ip" "user_agent" "referrer" "type" "agent" "os" "ref_domain" "mult" "set_cookie" "uniq"})
+
 (defn page [conn req]
   (let [params (-> req params/params-request :query-params)
         {:strs [from to]} params
         today (LocalDate/now)]
-    (if (or (nil? from) (nil? to))
+    (cond
+      (or (nil? from) (nil? to))
       (let [from (.with (LocalDate/now) (TemporalAdjusters/firstDayOfYear))
             to   (.with (LocalDate/now) (TemporalAdjusters/lastDayOfYear))]
         {:status  302
          :headers {"Location" (str "?" (querystring (assoc params "from" from "to" to)))}})
+
+      (not (every? allowed-params (keys params)))
+      {:status  302
+       :headers {"Location" (str "?" (querystring (select-keys params allowed-params)))}}
+
+      :else
       (let [from-date (LocalDate/parse from)
             to-date   (LocalDate/parse to)
-            where     (str/join " AND "
-                        (concat
-                          [(str "date >= '" from "'")
-                           (str "date <= '" to "'")]
-                          (for [[k v] (dissoc params "from" "to")]
-                            (str k " = '" (str/replace (str v) "'" "\\'") "'"))))
+            where     (concat
+                       [["date" ">=" from]
+                        ["date" "<=" to]]
+                       (for [[k v] (dissoc params "from" "to")]
+                         [k "=" v]))
             sb        (StringBuilder.)
             append    #(do
                          (doseq [s %&]
@@ -250,7 +275,7 @@
 
         ;; filters
         (let [{:keys [^LocalDate min-date
-                      ^LocalDate max-date]} (query "SELECT min(date), max(date) FROM stats"
+                      ^LocalDate max-date]} (query "SELECT min(date), max(date) FROM stats" []
                                               (fn [acc ^ResultSet rs]
                                                 (assoc acc
                                                   :min-date (.getObject rs 1)
@@ -415,13 +440,13 @@
                       (append "</table>")
                       (append "</div>")))]
           (append "<div class=tables>")
-          (tbl "Paths"       (top-10      conn "path"       (str "type = 'browser' AND " where)) {:param "path", :href-fn identity})
-          (tbl "Queries"     (top-10      conn "query"      (str "type = 'browser' AND " where)) {:param "query"})
-          (tbl "Referrers"   (top-10      conn "ref_domain" (str "type = 'browser' AND " where)) {:param "ref_domain", :href-fn #(str "https://" %)})
-          (tbl "Browsers"    (top-10-uniq conn "agent"      (str "type = 'browser' AND " where)) {:param "agent"})
-          #_(tbl "OSes"        (top-10-uniq conn "os"         (str "type = 'browser' AND " where)) {:param "os"})
-          (tbl "RSS Readers" (top-10-uniq conn "agent"      (str "type = 'feed'    AND " where)) {:param "agent"})
-          (tbl "Scrapers"    (top-10-uniq conn "agent"      (str "type = 'bot'     AND " where)) {:param "agent"})
+          (tbl "Paths"       (top-10      conn "path"       (cons ["type" "=" "browser"] where)) {:param "path", :href-fn identity})
+          (tbl "Queries"     (top-10      conn "query"      (cons ["type" "=" "browser"] where)) {:param "query"})
+          (tbl "Referrers"   (top-10      conn "ref_domain" (cons ["type" "=" "browser"] where)) {:param "ref_domain", :href-fn #(str "https://" %)})
+          (tbl "Browsers"    (top-10-uniq conn "agent"      (cons ["type" "=" "browser"] where)) {:param "agent"})
+          #_(tbl "OSes"        (top-10-uniq conn "os"         (cons ["type" "=" "browser"] where)) {:param "os"})
+          (tbl "RSS Readers" (top-10-uniq conn "agent"      (cons ["type" "=" "feed"] where)) {:param "agent"})
+          (tbl "Scrapers"    (top-10-uniq conn "agent"      (cons ["type" "=" "bot"] where)) {:param "agent"})
           (append "</div>"))
 
         (append "</body>")
