@@ -231,7 +231,7 @@
       params)))
 
 (def allowed-params
-  #{"from" "to" "path" "query" "ip" "user_agent" "referrer" "type" "agent" "os" "ref_domain" "mult" "set_cookie" "uniq"})
+  #{"from" "to" "path" "query" "referrer" "type" "agent" "os" "ref_domain"})
 
 (defn page [conn req]
   (let [params (-> req params/params-request :query-params)
@@ -346,7 +346,7 @@
                          (>= max-val     60)     20
                          :else                   10)]
 
-          (doseq [[type title] [[:browser "Unique visitors"]
+          (doseq [[type title] [[:browser "Human visitors"]
                                 [:feed "RSS Readers"]
                                 [:bot "Scrapers"]]
                   :let [date->cnt (get data type)]

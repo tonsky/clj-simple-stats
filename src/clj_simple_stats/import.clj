@@ -40,8 +40,7 @@
                           :os         (.getString rs 10)
                           :ref-domain (.getString rs 11)
                           :mult       (.getInt    rs 12)
-                          :set-cookie (.getObject rs 13)
-                          :uniq       (.getObject rs 14)}
+                          :uniq       (.getObject rs 13)}
                     line' (assoc line :ref-domain (analyzer/line-ref-domain line))]
                 (.beginRow apnd)
                 (.append apnd ^LocalDate (:date line'))
@@ -56,7 +55,6 @@
                 (.append apnd ^String    (:os line'))
                 (.append apnd ^String    (:ref-domain line'))
                 (.append apnd            (int (:mult line')))
-                (.append apnd ^UUID      (:set-cookie line'))
                 (.append apnd ^UUID      (:uniq line'))
                 (.endRow apnd)
                 (recur (inc acc)))
@@ -135,10 +133,10 @@
                       (keep parse-line-nginx)
                       (filter valid-line?)
                       (map analyzer/analyze)
-                      (map (juxt :date :time :path :query :ip :user-agent :referrer :type :agent :os :ref-domain :mult :set-cookie :uniq)))]
+                      (map (juxt :date :time :path :query :ip :user-agent :referrer :type :agent :os :ref-domain :mult :uniq)))]
           (with-open [writer (io/writer output)]
             (csv/write-csv writer
-              (cons ["date" "time" "path" "query" "ip" "user_agent" "referrer" "type" "agent" "os" "ref_domain" "mult" "set_cookie" "uniq"]
+              (cons ["date" "time" "path" "query" "ip" "user_agent" "referrer" "type" "agent" "os" "ref_domain" "mult" "uniq"]
                 lines))))
         (println (format "%,d ms %s" (dt) name))))))
 

@@ -22,7 +22,6 @@ Couple of highlights:
 - We try our best to distinguish between human visits, RSS readers, and scrapers.
 - The goal is to understand how many people see your site, not how many requests.
 - Only responses with status 200 and content-type: `text/html`, `application/atom+xml` or `application/rss+xml` are counted
-- Tracking cookie is used only to uniquely identify visitors; no cookie banner is needed.
 - Only two external dependencies: DuckDB and Ring (which you probably have anyway).
 
 ## Configuration
@@ -33,11 +32,7 @@ These default values are used; feel free to override:
 (wrap-stats handler
   {:db-path       "clj_simple_stats.duckdb"
    :uri           "/stats"
-   :dash-perms-fn (fn [req] true)
-   :cookie-name   "stats_id"
-   :cookie-opts   {:max-age   2147483647
-                   :path      "/"
-                   :http-only true}})
+   :dash-perms-fn (fn [req] true)})
 ```
 
 `wrap-stats` is a composition of `wrap-collect-stats` and `wrap-render-stats`, which you can use separately as well.

@@ -1,6 +1,7 @@
 # 1.2.0 - Jan 31, 2025
 
 - Guard against SQL injection
+- Remove stats cookie, IP and user-agent from DB
 
 # 1.1.0 - Dec 17, 2025
 

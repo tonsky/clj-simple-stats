@@ -23,14 +23,6 @@
 (def ^:private default-db-path
   "clj_simple_stats.duckdb")
 
-(def ^:private default-cookie-name
-  "stats_id")
-
-(def ^:private default-cookie-opts
-  {:max-age   2147483647
-   :path      "/"
-   :http-only true})
-
 (def ^:private default-uri
   "/stats")
 
@@ -67,17 +59,39 @@
          time       TIME,
          path       VARCHAR,
          query      VARCHAR,
-         ip         VARCHAR,
-         user_agent VARCHAR,
          referrer   VARCHAR,
          type       agent_type_t,
          agent      VARCHAR,
          os         agent_os_t,
          ref_domain VARCHAR,
          mult       INTEGER,
-         set_cookie UUID,
          uniq       UUID
        )")))
+
+(defn db-version ^long [^DuckDBConnection conn]
+  (with-open [stmt (.createStatement conn)
+              rs   (.executeQuery stmt
+                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'version'")]
+    (if (and (.next rs) (pos? (.getLong rs 1)))
+      (with-open [stmt' (.createStatement conn)
+                  rs'   (.executeQuery stmt' "SELECT version FROM version")]
+        (if (.next rs')
+          (.getLong rs' 1)
+          1))
+      1)))
+
+(defn migrate-1->2! [^DuckDBConnection conn]
+  (log "Migrating stats database to version 2")
+  (with-open [stmt (.createStatement conn)]
+    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS ip")
+    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS user_agent")
+    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS set_cookie")
+    (.execute stmt "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
+    (.execute stmt "INSERT INTO version VALUES (2)")))
+
+(defn maybe-migrate! [^DuckDBConnection conn]
+  (when (<= (db-version conn) 1)
+    (migrate-1->2! conn)))
 
 (defn connect ^DuckDBConnection [db-path reason]
   (let [exists  (File/.exists (io/file db-path))
@@ -166,23 +180,22 @@
         (some-> mime (str/starts-with? "application/atom+xml"))
         (some-> mime (str/starts-with? "application/rss+xml"))))))
 
-(defn- schedule-line! [req resp opts]
+(defn- maybe-schedule-line! [req resp]
   (when (loggable? req resp)
     (let [now  (LocalDateTime/now UTC)
           mime (content-type resp)
-          line (-> {:date       (-> now .toLocalDate)
-                    :time       (-> now .toLocalTime (.withNano 0))
-                    :path       (:uri req)
-                    :query      (:query-string req)
-                    :ip         (or
-                                  (get (:headers req) "x-forwarded-for")
-                                  (:remote-addr req))
-                    :user-agent (get (:headers req) "user-agent")
-                    :referrer   (get (:headers req) "referer")
-                    :type       (cond
-                                  (some-> mime (str/starts-with? "application/atom+xml")) "feed"
-                                  (some-> mime (str/starts-with? "application/rss+xml"))  "feed")}
-                 (merge opts))]
+          line {:date       (-> now .toLocalDate)
+                :time       (-> now .toLocalTime (.withNano 0))
+                :path       (:uri req)
+                :query      (:query-string req)
+                :ip         (or
+                              (get (:headers req) "x-forwarded-for")
+                              (:remote-addr req))
+                :user-agent (get (:headers req) "user-agent")
+                :referrer   (get (:headers req) "referer")
+                :type       (cond
+                              (some-> mime (str/starts-with? "application/atom+xml")) "feed"
+                              (some-> mime (str/starts-with? "application/rss+xml"))  "feed")}]
       (.add queue line))))
 
 (defn- insert-lines! [db-path lines]
@@ -196,29 +209,15 @@
         (.append apnd ^LocalTime (:time line'))
         (.append apnd ^String    (:path line'))
         (.append apnd ^String    (:query line'))
-        (.append apnd ^String    (:ip line'))
-        (.append apnd ^String    (:user-agent line'))
         (.append apnd ^String    (:referrer line'))
         (.append apnd ^String    (:type line'))
         (.append apnd ^String    (:agent line'))
         (.append apnd ^String    (:os line'))
         (.append apnd ^String    (:ref-domain line'))
         (.append apnd            (int (:mult line')))
-        (.append apnd ^UUID      (:set-cookie line'))
         (.append apnd ^UUID      (:uniq line'))
         (.endRow apnd))
       (.flush apnd))
-
-    (when-some [to-update (->> lines
-                            (filter :second-visit?)
-                            (map :uniq)
-                            (not-empty))]
-      (with-open [stmt (.prepareStatement conn "UPDATE stats SET uniq = ? WHERE set_cookie = ?")]
-        (doseq [uniq to-update]
-          (.setObject stmt 1 uniq)
-          (.setObject stmt 2 uniq)
-          (.addBatch stmt))
-        (.executeBatch stmt)))
     nil))
 
 (defn start-worker! [db-path]
@@ -248,55 +247,20 @@
 (defn wrap-collect-stats
   ([handler]
    (wrap-collect-stats handler {}))
-  ([handler {:keys [cookie-name cookie-opts db-path]
-             :or {cookie-name default-cookie-name
-                  db-path     default-db-path}}]
+  ([handler {:keys [db-path cookie-name]
+             :or {db-path     default-db-path
+                  cookie-name "stats_id"}}]
    (some-> @*worker Thread/.interrupt)
+   (with-conn [conn db-path]
+     (maybe-migrate! conn))
    (reset! *worker (start-worker! db-path))
    (fn [req]
-     (let [resp (handler req)]
-       (if-not (loggable? req resp)
-         ;; pass-through response
-         resp
-
-         ;; wrapped response
-         (let [old-cookie    (some-> req cookies/cookies-request :cookies (get cookie-name) :value)
-               first-visit?  (nil? old-cookie)
-               second-visit? (and old-cookie (str/starts-with? old-cookie "?"))
-               user-id       (cond
-                               (nil? old-cookie) (random-uuid)
-                               second-visit?     (parse-uuid (subs old-cookie 1))
-                               :else             (parse-uuid old-cookie))]
-           (schedule-line! req resp
-             {:set-cookie    (when first-visit?
-                               user-id)
-              :second-visit? second-visit?
-              :uniq          (when old-cookie
-                               user-id)})
-           (cond
-             ;; first time visit
-             first-visit?
-             (-> resp
-               (update :cookies assoc cookie-name
-                 (merge
-                   default-cookie-opts
-                   cookie-opts
-                   {:value (str "?" user-id)}))
-               (cookies/cookies-response))
-
-             ;; second time visit
-             second-visit?
-             (-> resp
-               (update :cookies assoc cookie-name
-                 (merge
-                   default-cookie-opts
-                   cookie-opts
-                   {:value (str user-id)}))
-               (cookies/cookies-response))
-
-             ;; third+ visit
-             :else
-             resp)))))))
+     (let [resp       (handler req)
+           has-cookie (some-> req cookies/cookies-request :cookies (get cookie-name))]
+       (maybe-schedule-line! req resp)
+       (cond-> resp
+         has-cookie (update :cookies assoc cookie-name {:value "" :max-age 0 :path "/"})
+         has-cookie (cookies/cookies-response))))))
 
 (defn render-stats
   ([req]
