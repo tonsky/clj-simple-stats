@@ -47,13 +47,6 @@ A: Unfortunately, no. This is designed to sit in your Ring middleware stack.
 Q: How can I select time intervals?
 A: Select whole years at the top of the page. Select whole months by clicking their labels in the graph. Everything else only by modifying URL params. Might change later.
 
-## In the wild
-
-You can see live deployments at
-
-- [grumpy.website/stats](https://grumpy.website/stats)
-- [tonsky.me/stats](https://tonsky.me/stats)
-
 ## License
 
 Copyright © 2025 Nikita Prokopov
