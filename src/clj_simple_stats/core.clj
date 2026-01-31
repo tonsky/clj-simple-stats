@@ -9,10 +9,11 @@
   (:import
    [java.io File]
    [java.lang AutoCloseable]
+   [java.nio.file Files StandardCopyOption]
    [java.sql DriverManager]
    [java.time LocalDate LocalTime LocalDateTime ZoneId]
    [java.time.format DateTimeFormatter]
-   [java.util ArrayList UUID]
+   [java.util ArrayList Random UUID]
    [java.util.concurrent LinkedBlockingQueue ScheduledFuture ScheduledThreadPoolExecutor ThreadFactory TimeUnit]
    [java.util.concurrent.locks ReentrantLock]
    [org.duckdb DuckDBConnection]))
@@ -47,8 +48,17 @@
 (defmacro log [& msgs]
   `(println ~@msgs))
 
+(defn connect ^DuckDBConnection [db-path]
+  (log-verbose "Opening" db-path)
+  (DriverManager/getConnection (str "jdbc:duckdb:" db-path)))
+
 (defn init-db! [^DuckDBConnection conn]
+  (log "Initializing" (-> conn .getMetaData .getURL (str/replace #"^jdbc:duckdb:" "")))
   (with-open [stmt (.createStatement conn)]
+    (.execute stmt
+      "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
+    (.execute stmt
+      "INSERT INTO version VALUES (2)")
     (.execute stmt
       "CREATE TYPE IF NOT EXISTS agent_type_t AS ENUM ('feed', 'bot', 'browser')")
     (.execute stmt
@@ -69,99 +79,52 @@
        )")))
 
 (defn db-version ^long [^DuckDBConnection conn]
-  (with-open [stmt (.createStatement conn)
-              rs   (.executeQuery stmt
-                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'version'")]
-    (if (and (.next rs) (pos? (.getLong rs 1)))
-      (with-open [stmt' (.createStatement conn)
-                  rs'   (.executeQuery stmt' "SELECT version FROM version")]
-        (if (.next rs')
-          (.getLong rs' 1)
-          1))
-      1)))
+  (or
+    (with-open [stmt (.createStatement conn)
+                rs   (.executeQuery stmt "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'version'")]
+      (when (and (.next rs) (pos? (.getLong rs 1)))
+        (with-open [stmt' (.createStatement conn)
+                    rs'   (.executeQuery stmt' "SELECT version FROM version")]
+          (when (.next rs')
+            (.getLong rs' 1)))))
+    1))
 
-(defn migrate-1->2! [^DuckDBConnection conn]
-  (log "Migrating stats database to version 2")
-  (with-open [stmt (.createStatement conn)]
-    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS ip")
-    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS user_agent")
-    (.execute stmt "ALTER TABLE stats DROP COLUMN IF EXISTS set_cookie")
-    (.execute stmt "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
-    (.execute stmt "INSERT INTO version VALUES (2)")))
+(defn migrate-1->2! [^String db-path]
+  (log "Migrating" db-path "to version 2")
+  (let [tmp-file (io/file
+                   (or (.getParentFile (io/file db-path)) (io/file "."))
+                   (str "clj_simple_stats_migrate_" (-> (Random.) .nextLong Long/toUnsignedString) ".duckdb"))]
+    (with-open [conn (connect (.getPath tmp-file))]
+      (init-db! conn)
+      (with-open [stmt (.createStatement conn)]
+        (.execute stmt (str "ATTACH '" db-path "' AS olddb (READ_ONLY)"))
+        (.execute stmt
+          "INSERT INTO stats
+             SELECT date, time, path, query, referrer, type, agent, os, ref_domain, mult, uniq
+             FROM olddb.stats")))
+    (Files/move
+      (.toPath tmp-file)
+      (.toPath (io/file db-path))
+      (into-array [StandardCopyOption/REPLACE_EXISTING StandardCopyOption/ATOMIC_MOVE]))
+    (log "Migration to version 2 complete")))
 
-(defn maybe-migrate! [^DuckDBConnection conn]
-  (when (<= (db-version conn) 1)
-    (migrate-1->2! conn)))
-
-(defn connect ^DuckDBConnection [db-path reason]
-  (let [exists  (File/.exists (io/file db-path))
-        _       (log-verbose "Opening" db-path reason)
-        conn    (DriverManager/getConnection (str "jdbc:duckdb:" db-path))]
-    (when-not exists
-      (log "Initializing" db-path)
+(defn check-db [db-path]
+  (if-not (File/.exists (io/file db-path))
+    (with-open [conn (connect db-path)]
       (init-db! conn))
-    conn))
-
-;; {db-path -> {:conn ..., :future ...}}
-(def *conns
-  (atom {}))
-
-(def conn-ttl-ms
-  10000)
-
-(def worker-conn-ttl-ms
-  1000)
-
-(def ^ScheduledThreadPoolExecutor scheduler
-  (doto
-    (ScheduledThreadPoolExecutor.
-      1
-      (reify ThreadFactory
-        (newThread [_ runnable]
-          (doto
-            (Thread. ^Runnable runnable "clj-simple-stats.core/scheduler")
-            (.setDaemon true)))))
-    (.setExecuteExistingDelayedTasksAfterShutdownPolicy false)
-    (.setRemoveOnCancelPolicy true)))
+    (let [v (with-open [conn (connect db-path)]
+              (db-version conn))]
+      (when (<= v 1)
+        (migrate-1->2! db-path)))))
 
 (def *worker
   (atom nil))
 
-(defn close-runnable ^Runnable [db-path]
-  (fn []
-    (log-verbose "Closing" db-path "by timeout")
-    (with-lock db-lock
-      (try
-        (-> @*conns (get db-path) :conn AutoCloseable/.close)
-        (catch Exception e
-          (println e)))
-      (swap! *conns dissoc db-path))))
-
-(defmacro with-conn [[sym db-path] & opts+body]
-  (let [sym (vary-meta sym assoc :tag 'DuckDBConnection)
-        [opts body] (if (map? (first opts+body))
-                      [(first opts+body) (next opts+body)]
-                      [{} opts+body])]
+(defmacro with-conn [[sym db-path] & body]
+  (let [sym (vary-meta sym assoc :tag 'DuckDBConnection)]
     `(with-lock db-lock
-       (let [db-path#          ~db-path
-             new-ttl#          (or (:ttl ~opts) conn-ttl-ms)
-             {conn# :conn
-              future# :future} (or
-                                 (get @*conns db-path#)
-                                 {:conn (connect db-path# (str "for " new-ttl# " ms"))})
-             old-ttl#          (when future#
-                                 (ScheduledFuture/.getDelay future# TimeUnit/MILLISECONDS))
-             _#                (when (and future# (< old-ttl# new-ttl#))
-                                 (ScheduledFuture/.cancel future# false))
-             future#           (if (or (nil? future#) (< old-ttl# new-ttl#))
-                                 (do
-                                   (log-verbose "Extending" db-path# "to" new-ttl# "ms")
-                                   (.schedule scheduler (close-runnable db-path#) (int new-ttl#) TimeUnit/MILLISECONDS))
-                                 future#)]
-         (swap! *conns assoc db-path# {:conn   conn#
-                                       :future future#})
-         (let [~sym conn#]
-           ~@body)))))
+       (with-open [~sym (connect ~db-path)]
+         ~@body))))
 
 (defn- content-type [resp]
   ((some-fn
@@ -199,7 +162,7 @@
       (.add queue line))))
 
 (defn- insert-lines! [db-path lines]
-  (with-conn [conn db-path] {:ttl worker-conn-ttl-ms}
+  (with-conn [conn db-path]
     (log-verbose "Inserting" (count lines) "lines to" db-path)
     (with-open [apnd (.createAppender conn DuckDBConnection/DEFAULT_SCHEMA "stats")]
       (doseq [line lines
@@ -251,8 +214,7 @@
              :or {db-path     default-db-path
                   cookie-name "stats_id"}}]
    (some-> @*worker Thread/.interrupt)
-   (with-conn [conn db-path]
-     (maybe-migrate! conn))
+   (check-db db-path)
    (reset! *worker (start-worker! db-path))
    (fn [req]
      (let [resp       (handler req)
@@ -300,14 +262,4 @@
      (wrap-render-stats opts))))
 
 (defn before-ns-unload []
-  (some-> @*worker Thread/.interrupt)
-  (log-verbose "Shutting down pool")
-  (.shutdown scheduler)
-  (.awaitTermination scheduler 10000 TimeUnit/MILLISECONDS)
-  (with-lock db-lock
-    (doseq [[db-path {:keys [conn]}] @*conns]
-      (try
-        (log-verbose "Closing" db-path "because of shutdown")
-        (AutoCloseable/.close conn)
-        (catch Exception e
-          (log e))))))
+  (some-> @*worker Thread/.interrupt))
