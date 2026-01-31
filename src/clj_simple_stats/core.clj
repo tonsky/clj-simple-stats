@@ -48,12 +48,15 @@
 (defmacro log [& msgs]
   `(println ~@msgs))
 
+(defn conn-path [^DuckDBConnection conn]
+  (-> conn .getMetaData .getURL (str/replace #"^jdbc:duckdb:" "")))
+
 (defn connect ^DuckDBConnection [db-path]
   (log-verbose "Opening" db-path)
   (DriverManager/getConnection (str "jdbc:duckdb:" db-path)))
 
 (defn init-db! [^DuckDBConnection conn]
-  (log "Initializing" (-> conn .getMetaData .getURL (str/replace #"^jdbc:duckdb:" "")))
+  (log "Initializing" (conn-path conn))
   (with-open [stmt (.createStatement conn)]
     (.execute stmt
       "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
@@ -117,7 +120,10 @@
       (when (<= v 1)
         (migrate-1->2! db-path)))))
 
-(def *worker
+(def ^:private *worker-pool
+  (atom nil))
+
+(def ^:private *worker-task
   (atom nil))
 
 (defmacro with-conn [[sym db-path] & body]
@@ -162,9 +168,10 @@
       (.add queue line))))
 
 (defn- insert-lines! [db-path lines]
-  (with-conn [conn db-path]
-    (log-verbose "Inserting" (count lines) "lines to" db-path)
-    (with-open [apnd (.createAppender conn DuckDBConnection/DEFAULT_SCHEMA "stats")]
+  (log-verbose "Inserting" (count lines) "lines to" db-path)
+  (with-open [conn (connect db-path)
+              apnd (.createAppender conn DuckDBConnection/DEFAULT_SCHEMA "stats")]
+    (doseq [lines (partition-all 1000 lines)]
       (doseq [line lines
               :let [line' (analyzer/analyze line)]]
         (.beginRow apnd)
@@ -180,32 +187,34 @@
         (.append apnd            (int (:mult line')))
         (.append apnd ^UUID      (:uniq line'))
         (.endRow apnd))
-      (.flush apnd))
-    nil))
+      (.flush apnd)))
+  nil)
+
+(defn- maybe-shutdown-worker! []
+  (when-some [task (first (reset-vals! *worker-task nil))]
+    (.cancel ^ScheduledFuture task false)
+    (log-verbose "Shut down worker"))
+  (when-some [pool (first (reset-vals! *worker-pool nil))]
+    (.shutdown ^ScheduledThreadPoolExecutor pool)))
 
 (defn start-worker! [db-path]
-  (doto
-    (Thread.
-      (fn []
-        (try
-          (let [buf (ArrayList. 100)]
-            (loop []
-              (.clear buf)
-              (.drainTo queue buf 100)
-              (try
-                (if (.isEmpty buf)
-                  (insert-lines! db-path [(.take queue)]) ;; block here
-                  (insert-lines! db-path buf))
-                (catch InterruptedException e
-                  (throw e))
-                (catch Exception e
-                  (log e)))
-              (recur)))
-          (catch InterruptedException e
-            (log-verbose (.getName (Thread/currentThread)) "graceful shutdown")))))
-    (.setDaemon true)
-    (.setName (str "clj-simple-stats.core/worker(path=" db-path ")"))
-    (.start)))
+  (log-verbose "Starting worker for" db-path)
+  (let [pool (ScheduledThreadPoolExecutor. 1
+               (reify ThreadFactory
+                 (newThread [_ r]
+                   (doto (Thread. r)
+                     (.setDaemon true)
+                     (.setName "clj-simple-stats.core/worker")))))
+        task (fn []
+               (try
+                 (let [buf (ArrayList.)]
+                   (.drainTo queue buf)
+                   (when-not (.isEmpty buf)
+                     (insert-lines! db-path buf)))
+                 (catch Exception e
+                   (log e))))]
+    (reset! *worker-pool pool)
+    (reset! *worker-task (.scheduleAtFixedRate pool ^Runnable task 1 1 TimeUnit/MINUTES))))
 
 (defn wrap-collect-stats
   ([handler]
@@ -213,9 +222,9 @@
   ([handler {:keys [db-path cookie-name]
              :or {db-path     default-db-path
                   cookie-name "stats_id"}}]
-   (some-> @*worker Thread/.interrupt)
+   (maybe-shutdown-worker!)
    (check-db db-path)
-   (reset! *worker (start-worker! db-path))
+   (start-worker! db-path)
    (fn [req]
      (let [resp       (handler req)
            has-cookie (some-> req cookies/cookies-request :cookies (get cookie-name))]
@@ -262,4 +271,4 @@
      (wrap-render-stats opts))))
 
 (defn before-ns-unload []
-  (some-> @*worker Thread/.interrupt))
+  (maybe-shutdown-worker!))
