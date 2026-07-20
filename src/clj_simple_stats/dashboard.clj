@@ -64,29 +64,6 @@
   (clj-simple-stats.core/with-conn [conn "grumpy_data/stats.duckdb"]
     (visits-by-type+date conn "date <= '2025-12-31' AND date >= '2025-01-01'")))
 
-(defn total-uniq [conn f]
-  (query
-    (str
-      "WITH subq AS (
-        SELECT type, MAX(mult) AS mult
-        FROM stats
-        WHERE " (filter->where f) "
-        GROUP BY type, uniq
-      )
-      FROM subq
-      SELECT type, SUM(mult) AS cnt
-      GROUP BY type")
-    (filter->params f)
-    (fn [acc ^ResultSet rs]
-      (let [type (.getString rs 1)
-            cnt  (.getLong rs 2)]
-        (assoc acc (keyword type) cnt)))
-    {} conn))
-
-(comment
-  (clj-simple-stats.core/with-conn [conn "grumpy_data/stats.duckdb"]
-    (total-uniq conn "date <= '2025-12-31' AND date >= '2025-01-01'")))
-
 (defn top-10 [conn what f]
   (->
     (query
@@ -137,7 +114,7 @@
            SELECT ANY_VALUE(" what ") AS " what ", MAX(mult) AS mult
            FROM stats
            WHERE " (filter->where f) "
-           GROUP BY uniq
+           GROUP BY date, uniq
          ),
          top_values AS (
            FROM base_query
@@ -177,6 +154,118 @@
     #_(top-10 conn "path" "type = 'browser'")
     (top-10 conn "query" "type = 'browser'")
     #_(top-10 conn "query" "path = '/search' AND type = 'browser'")))
+
+;; Rollup variants: used when no filters except from/to are set. Closed days come
+;; from daily_counts, days after rollup_state.last_date (i.e. today) from stats.
+
+(defn visits-by-type+date-rollup [conn from to]
+  (->
+    (query
+      "SELECT dim::VARCHAR AS type, date, SUM(cnt) AS cnt
+       FROM daily_counts
+       WHERE dim IN ('browser', 'feed', 'bot') AND date >= ? AND date <= ?
+       GROUP BY dim, date
+       UNION ALL
+       SELECT type::VARCHAR, date, SUM(mult)
+       FROM (SELECT type, date, uniq, MAX(mult) AS mult
+             FROM stats
+             WHERE date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+             GROUP BY type, date, uniq)
+       GROUP BY type, date"
+      [from to from to]
+      (fn [acc ^ResultSet rs]
+        (let [type (.getString rs 1)
+              date (.getObject rs 2)
+              cnt  (.getLong rs 3)]
+          (update acc (keyword type) (fnil assoc! (transient {})) date cnt)))
+      {} conn)
+    (update-vals persistent!)))
+
+(defn top-10-rollup [conn what from to]
+  (->
+    (query
+      (str
+        "WITH counts AS (
+           SELECT value, cnt FROM daily_counts
+           WHERE dim = '" what "' AND date >= ? AND date <= ?
+           UNION ALL
+           SELECT " what " AS value, COUNT(*) AS cnt
+           FROM stats
+           WHERE type = 'browser' AND " what " IS NOT NULL
+             AND date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+           GROUP BY " what "
+         ),
+         top_values AS (
+           SELECT value, SUM(cnt) AS count
+           FROM counts
+           WHERE value IS NOT NULL
+           GROUP BY value
+         ),
+         top_n AS (
+           SELECT *
+           FROM top_values
+           ORDER BY count DESC
+           LIMIT 10
+         ),
+         others AS (
+           SELECT
+             NULL AS value,
+             SUM(count) AS count
+           FROM top_values
+           WHERE value NOT IN (SELECT value FROM top_n)
+         )
+         FROM top_n
+         UNION ALL
+         FROM others
+         WHERE count > 0")
+      [from to from to]
+      (fn [acc ^ResultSet rs]
+        (conj! acc [(.getString rs 1) (.getLong rs 2)]))
+      (transient []) conn)
+    persistent!))
+
+(defn top-10-uniq-rollup [conn type from to]
+  (->
+    (query
+      (str
+        "WITH counts AS (
+           SELECT value, cnt FROM daily_counts
+           WHERE dim = '" type "' AND date >= ? AND date <= ?
+           UNION ALL
+           SELECT ANY_VALUE(agent) AS value, MAX(mult) AS cnt
+           FROM stats
+           WHERE type = '" type "'
+             AND date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+           GROUP BY date, uniq
+         ),
+         top_values AS (
+           SELECT value, SUM(cnt) AS count
+           FROM counts
+           WHERE value IS NOT NULL
+           GROUP BY value
+         ),
+         top_n AS (
+           SELECT *
+           FROM top_values
+           ORDER BY count DESC
+           LIMIT 10
+         ),
+         others AS (
+           SELECT
+             NULL AS value,
+             SUM(count) AS count
+           FROM top_values
+           WHERE value NOT IN (SELECT value FROM top_n)
+         )
+         FROM top_n
+         UNION ALL
+         FROM others
+         WHERE count > 0")
+      [from to from to]
+      (fn [acc ^ResultSet rs]
+        (conj! acc [(.getString rs 1) (.getLong rs 2)]))
+      (transient []) conn)
+    persistent!))
 
 (defn styles []
   (slurp (io/resource "clj_simple_stats/style.css")))
@@ -251,6 +340,7 @@
       :else
       (let [from-date (LocalDate/parse from)
             to-date   (LocalDate/parse to)
+            filtered? (boolean (seq (dissoc params "from" "to")))
             where     (concat
                        [["date" ">=" from]
                         ["date" "<=" to]]
@@ -311,8 +401,10 @@
           (append "</div>")) ;; .filters
 
         ;; timelines
-        (let [data     (visits-by-type+date conn where)
-              totals   (total-uniq conn where)
+        (let [data     (if filtered?
+                         (visits-by-type+date conn where)
+                         (visits-by-type+date-rollup conn from to))
+              totals   (update-vals data (fn [date->cnt] (reduce + 0 (vals date->cnt))))
               max-val  (->> data
                          (mapcat (fn [[_type date->cnt]] (vals date->cnt)))
                          (reduce max 1))
@@ -438,15 +530,23 @@
                         (append "<td class='pct'>" percent-str "</td>")
                         (append "</tr>"))
                       (append "</table>")
-                      (append "</div>")))]
+                      (append "</div>")))
+              top-10*      (fn [what]
+                             (if filtered?
+                               (top-10 conn what (cons ["type" "=" "browser"] where))
+                               (top-10-rollup conn what from to)))
+              top-10-uniq* (fn [type]
+                             (if filtered?
+                               (top-10-uniq conn "agent" (cons ["type" "=" type] where))
+                               (top-10-uniq-rollup conn type from to)))]
           (append "<div class=tables>")
-          (tbl "Paths"       (top-10      conn "path"       (cons ["type" "=" "browser"] where)) {:param "path", :href-fn identity})
-          (tbl "Queries"     (top-10      conn "query"      (cons ["type" "=" "browser"] where)) {:param "query"})
-          (tbl "Referrers"   (top-10      conn "ref_domain" (cons ["type" "=" "browser"] where)) {:param "ref_domain", :href-fn #(str "https://" %)})
-          (tbl "Browsers"    (top-10-uniq conn "agent"      (cons ["type" "=" "browser"] where)) {:param "agent"})
-          #_(tbl "OSes"        (top-10-uniq conn "os"         (cons ["type" "=" "browser"] where)) {:param "os"})
-          (tbl "RSS Readers" (top-10-uniq conn "agent"      (cons ["type" "=" "feed"] where)) {:param "agent"})
-          (tbl "Scrapers"    (top-10-uniq conn "agent"      (cons ["type" "=" "bot"] where)) {:param "agent"})
+          (tbl "Paths"       (top-10* "path")         {:param "path", :href-fn identity})
+          (tbl "Queries"     (top-10* "query")        {:param "query"})
+          (tbl "Referrers"   (top-10* "ref_domain")   {:param "ref_domain", :href-fn #(str "https://" %)})
+          (tbl "Browsers"    (top-10-uniq* "browser") {:param "agent"})
+          #_(tbl "OSes"        (top-10-uniq conn "os"   (cons ["type" "=" "browser"] where)) {:param "os"})
+          (tbl "RSS Readers" (top-10-uniq* "feed")    {:param "agent"})
+          (tbl "Scrapers"    (top-10-uniq* "bot")     {:param "agent"})
           (append "</div>"))
 
         (append "</body>")

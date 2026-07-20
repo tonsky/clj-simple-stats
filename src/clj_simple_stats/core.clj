@@ -55,13 +55,19 @@
   (log-verbose "Opening" db-path)
   (DriverManager/getConnection (str "jdbc:duckdb:" db-path)))
 
+(defmacro with-conn [[sym db-path] & body]
+  (let [sym (vary-meta sym assoc :tag 'DuckDBConnection)]
+    `(with-lock db-lock
+       (with-open [~sym (connect ~db-path)]
+         ~@body))))
+
 (defn init-db! [^DuckDBConnection conn]
   (log "Initializing" (conn-path conn))
   (with-open [stmt (.createStatement conn)]
     (.execute stmt
       "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
     (.execute stmt
-      "INSERT INTO version VALUES (2)")
+      "INSERT INTO version VALUES (3)")
     (.execute stmt
       "CREATE TYPE IF NOT EXISTS agent_type_t AS ENUM ('feed', 'bot', 'browser')")
     (.execute stmt
@@ -79,7 +85,24 @@
          ref_domain VARCHAR,
          mult       INTEGER,
          uniq       UUID
-       )")))
+       )")
+    (.execute stmt
+      "CREATE TYPE IF NOT EXISTS dim_t AS ENUM ('feed', 'bot', 'browser', 'path', 'query', 'ref_domain')")
+    (.execute stmt
+      ;; Per-day aggregates of stats for all days <= rollup_state.last_date.
+      ;; For dims feed/bot/browser, value is agent (possibly NULL) and cnt is
+      ;; per-day unique visitors weighted by mult. For dims path/query/ref_domain,
+      ;; value is that column and cnt is a plain hit count, type = 'browser' only.
+      "CREATE TABLE IF NOT EXISTS daily_counts (
+         date  DATE,
+         dim   dim_t,
+         value VARCHAR,
+         cnt   BIGINT
+       )")
+    (.execute stmt
+      "CREATE TABLE IF NOT EXISTS rollup_state (last_date DATE)")
+    (.execute stmt
+      "INSERT INTO rollup_state VALUES (DATE '1970-01-01')")))
 
 (defn db-version ^long [^DuckDBConnection conn]
   (or
@@ -98,8 +121,29 @@
                    (or (.getParentFile (io/file db-path)) (io/file "."))
                    (str "clj_simple_stats_migrate_" (-> (Random.) .nextLong Long/toUnsignedString) ".duckdb"))]
     (with-open [conn (connect (.getPath tmp-file))]
-      (init-db! conn)
       (with-open [stmt (.createStatement conn)]
+        (.execute stmt
+          "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
+        (.execute stmt
+          "INSERT INTO version VALUES (2)")
+        (.execute stmt
+          "CREATE TYPE IF NOT EXISTS agent_type_t AS ENUM ('feed', 'bot', 'browser')")
+        (.execute stmt
+          "CREATE TYPE IF NOT EXISTS agent_os_t AS ENUM ('Android', 'Windows', 'iOS', 'macOS', 'Linux')")
+        (.execute stmt
+          "CREATE TABLE IF NOT EXISTS stats (
+             date       DATE,
+             time       TIME,
+             path       VARCHAR,
+             query      VARCHAR,
+             referrer   VARCHAR,
+             type       agent_type_t,
+             agent      VARCHAR,
+             os         agent_os_t,
+             ref_domain VARCHAR,
+             mult       INTEGER,
+             uniq       UUID
+           )")
         (.execute stmt (str "ATTACH '" db-path "' AS olddb (READ_ONLY)"))
         (.execute stmt
           "INSERT INTO stats
@@ -111,6 +155,103 @@
       (into-array [StandardCopyOption/REPLACE_EXISTING StandardCopyOption/ATOMIC_MOVE]))
     (log "Migration to version 2 complete")))
 
+(defn migrate-2->3! [^String db-path]
+  (log "Migrating" db-path "to version 3")
+  (with-open [conn (connect db-path)
+              stmt (.createStatement conn)]
+    (.execute stmt
+      "CREATE TYPE IF NOT EXISTS dim_t AS ENUM ('feed', 'bot', 'browser', 'path', 'query', 'ref_domain')")
+    (.execute stmt
+      "CREATE TABLE IF NOT EXISTS daily_counts (
+         date  DATE,
+         dim   dim_t,
+         value VARCHAR,
+         cnt   BIGINT
+       )")
+    (.execute stmt
+      "CREATE TABLE IF NOT EXISTS rollup_state (last_date DATE)")
+    (.execute stmt
+      "INSERT INTO rollup_state SELECT DATE '1970-01-01' WHERE NOT EXISTS (SELECT * FROM rollup_state)")
+    (.execute stmt
+      "UPDATE version SET version = 3"))
+  (log "Migration to version 3 complete"))
+
+(defn- rollup-day!
+  "Aggregates one day of stats into daily_counts and advances rollup_state to it"
+  [^DuckDBConnection conn ^LocalDate date]
+  (log-verbose "Rolling up" (str date))
+  (.setAutoCommit conn false)
+  (try
+    (with-open [stmt (.prepareStatement conn "DELETE FROM daily_counts WHERE date = ?")]
+      (.setObject stmt 1 date)
+      (.execute stmt))
+    (with-open [stmt (.prepareStatement conn
+                       "INSERT INTO daily_counts
+                          SELECT date, type::VARCHAR::dim_t, agent, SUM(mult)
+                          FROM (SELECT date, type, ANY_VALUE(agent) AS agent, uniq, MAX(mult) AS mult
+                                FROM stats
+                                WHERE date = ?
+                                GROUP BY date, type, uniq)
+                          GROUP BY date, type, agent")]
+      (.setObject stmt 1 date)
+      (.execute stmt))
+    (doseq [dim ["path" "query" "ref_domain"]]
+      (with-open [stmt (.prepareStatement conn
+                         (str
+                           "INSERT INTO daily_counts
+                              SELECT date, '" dim "', " dim ", COUNT(*)
+                              FROM stats
+                              WHERE date = ? AND type = 'browser' AND " dim " IS NOT NULL
+                              GROUP BY date, " dim))]
+        (.setObject stmt 1 date)
+        (.execute stmt)))
+    (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
+      (.setObject stmt 1 date)
+      (.execute stmt))
+    (.commit conn)
+    (catch Throwable t
+      (.rollback conn)
+      (throw t))
+    (finally
+      (.setAutoCommit conn true))))
+
+(defn rollup!
+  "Rolls up every completed UTC day after rollup_state.last_date into daily_counts,
+   day by day, then advances the watermark to yesterday"
+  [db-path]
+  (with-conn [conn db-path]
+    (let [yesterday (.minusDays (LocalDate/now UTC) 1)
+          last-date (with-open [stmt (.createStatement conn)
+                                rs   (.executeQuery stmt "SELECT last_date FROM rollup_state")]
+                      (when (.next rs)
+                        ^LocalDate (.getObject rs 1)))]
+      (when (and last-date (LocalDate/.isBefore last-date yesterday))
+        (let [dates (with-open [stmt (doto (.prepareStatement conn
+                                             "SELECT DISTINCT date FROM stats WHERE date > ? AND date <= ? ORDER BY date")
+                                       (.setObject 1 last-date)
+                                       (.setObject 2 yesterday))
+                                rs   (.executeQuery stmt)]
+                      (loop [acc []]
+                        (if (.next rs)
+                          (recur (conj acc (.getObject rs 1)))
+                          acc)))]
+          (doseq [date dates]
+            (rollup-day! conn date))
+          ;; advance watermark over trailing empty days too
+          (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
+            (.setObject stmt 1 yesterday)
+            (.execute stmt))
+          (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday)))))))
+
+(defn rebuild-rollup!
+  "Recompute daily_counts from scratch"
+  [db-path]
+  (with-conn [conn db-path]
+    (with-open [stmt (.createStatement conn)]
+      (.execute stmt "DELETE FROM daily_counts")
+      (.execute stmt "UPDATE rollup_state SET last_date = DATE '1970-01-01'")))
+  (rollup! db-path))
+
 (defn check-db [db-path]
   (if-not (File/.exists (io/file db-path))
     (with-open [conn (connect db-path)]
@@ -118,19 +259,15 @@
     (let [v (with-open [conn (connect db-path)]
               (db-version conn))]
       (when (<= v 1)
-        (migrate-1->2! db-path)))))
+        (migrate-1->2! db-path))
+      (when (<= v 2)
+        (migrate-2->3! db-path)))))
 
 (def ^:private *worker-pool
   (atom nil))
 
 (def ^:private *worker-task
   (atom nil))
-
-(defmacro with-conn [[sym db-path] & body]
-  (let [sym (vary-meta sym assoc :tag 'DuckDBConnection)]
-    `(with-lock db-lock
-       (with-open [~sym (connect ~db-path)]
-         ~@body))))
 
 (defn- content-type [resp]
   ((some-fn
@@ -210,11 +347,16 @@
                  (let [buf (ArrayList.)]
                    (.drainTo queue buf)
                    (when-not (.isEmpty buf)
-                     (insert-lines! db-path buf)))
+                     (insert-lines! db-path buf))
+                   ;; runs after insert so a day is only rolled up once all its
+                   ;; queued lines are in stats; no-op while watermark is current
+                   (rollup! db-path))
                  (catch Exception e
                    (log e))))]
     (reset! *worker-pool pool)
-    (reset! *worker-task (.scheduleAtFixedRate pool ^Runnable task 1 1 TimeUnit/MINUTES))))
+    ;; first tick right away: after an upgrade it backfills daily_counts
+    ;; in the background while the site is already serving
+    (reset! *worker-task (.scheduleAtFixedRate pool ^Runnable task 0 1 TimeUnit/MINUTES))))
 
 (defn wrap-collect-stats
   ([handler]

@@ -1,4 +1,9 @@
-# 1.2.0 - Jan 31, 2025
+# 1.3.0 - Jul 20, 2026
+
+- Per-day rollup table `daily_counts`
+- Unique visitor counts are now per-day instead of deduplicated across the whole range
+
+# 1.2.0 - Jan 31, 2026
 
 - Guard against SQL injection
 - Remove stats cookie, IP and user-agent from DB
