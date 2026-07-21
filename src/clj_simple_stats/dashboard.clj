@@ -267,6 +267,14 @@
       (transient []) conn)
     persistent!))
 
+(defn- query-async [^DuckDBConnection conn f]
+  (let [conn' (.duplicate conn)]
+    (future
+      (try
+        (f conn')
+        (finally
+          (.close conn'))))))
+
 (defn styles []
   (slurp (io/resource "clj_simple_stats/style.css")))
 
@@ -346,6 +354,37 @@
                         ["date" "<=" to]]
                        (for [[k v] (dissoc params "from" "to")]
                          [k "=" v]))
+            minmax-fut   (query-async conn
+                           (fn [conn]
+                             (query "SELECT min(date), max(date) FROM stats" []
+                               (fn [acc ^ResultSet rs]
+                                 (assoc acc
+                                   :min-date (.getObject rs 1)
+                                   :max-date (.getObject rs 2)))
+                               {} conn)))
+            data-fut     (query-async conn
+                           (fn [conn]
+                             (if filtered?
+                               (visits-by-type+date conn where)
+                               (visits-by-type+date-rollup conn from to))))
+            top-10-fut   (fn [what]
+                           (query-async conn
+                             (fn [conn]
+                               (if filtered?
+                                 (top-10 conn what (cons ["type" "=" "browser"] where))
+                                 (top-10-rollup conn what from to)))))
+            top-10-uniq-fut (fn [type]
+                              (query-async conn
+                                (fn [conn]
+                                  (if filtered?
+                                    (top-10-uniq conn "agent" (cons ["type" "=" type] where))
+                                    (top-10-uniq-rollup conn type from to)))))
+            paths-fut    (top-10-fut "path")
+            queries-fut  (top-10-fut "query")
+            refs-fut     (top-10-fut "ref_domain")
+            browsers-fut (top-10-uniq-fut "browser")
+            feeds-fut    (top-10-uniq-fut "feed")
+            bots-fut     (top-10-uniq-fut "bot")
             sb        (StringBuilder.)
             append    #(do
                          (doseq [s %&]
@@ -365,12 +404,7 @@
 
         ;; filters
         (let [{:keys [^LocalDate min-date
-                      ^LocalDate max-date]} (query "SELECT min(date), max(date) FROM stats" []
-                                              (fn [acc ^ResultSet rs]
-                                                (assoc acc
-                                                  :min-date (.getObject rs 1)
-                                                  :max-date (.getObject rs 2)))
-                                              {} conn)
+                      ^LocalDate max-date]} @minmax-fut
               min-date       (or min-date (.with (LocalDate/now) (TemporalAdjusters/firstDayOfYear)))
               max-date       (or max-date (.with (LocalDate/now) (TemporalAdjusters/lastDayOfYear)))
               min-year       (.getYear min-date)
@@ -401,9 +435,7 @@
           (append "</div>")) ;; .filters
 
         ;; timelines
-        (let [data     (if filtered?
-                         (visits-by-type+date conn where)
-                         (visits-by-type+date-rollup conn from to))
+        (let [data     @data-fut
               totals   (update-vals data (fn [date->cnt] (reduce + 0 (vals date->cnt))))
               max-val  (->> data
                          (mapcat (fn [[_type date->cnt]] (vals date->cnt)))
@@ -530,23 +562,15 @@
                         (append "<td class='pct'>" percent-str "</td>")
                         (append "</tr>"))
                       (append "</table>")
-                      (append "</div>")))
-              top-10*      (fn [what]
-                             (if filtered?
-                               (top-10 conn what (cons ["type" "=" "browser"] where))
-                               (top-10-rollup conn what from to)))
-              top-10-uniq* (fn [type]
-                             (if filtered?
-                               (top-10-uniq conn "agent" (cons ["type" "=" type] where))
-                               (top-10-uniq-rollup conn type from to)))]
+                      (append "</div>")))]
           (append "<div class=tables>")
-          (tbl "Paths"       (top-10* "path")         {:param "path", :href-fn identity})
-          (tbl "Queries"     (top-10* "query")        {:param "query"})
-          (tbl "Referrers"   (top-10* "ref_domain")   {:param "ref_domain", :href-fn #(str "https://" %)})
-          (tbl "Browsers"    (top-10-uniq* "browser") {:param "agent"})
+          (tbl "Paths"       @paths-fut    {:param "path", :href-fn identity})
+          (tbl "Queries"     @queries-fut  {:param "query"})
+          (tbl "Referrers"   @refs-fut     {:param "ref_domain", :href-fn #(str "https://" %)})
+          (tbl "Browsers"    @browsers-fut {:param "agent"})
           #_(tbl "OSes"        (top-10-uniq conn "os"   (cons ["type" "=" "browser"] where)) {:param "os"})
-          (tbl "RSS Readers" (top-10-uniq* "feed")    {:param "agent"})
-          (tbl "Scrapers"    (top-10-uniq* "bot")     {:param "agent"})
+          (tbl "RSS Readers" @feeds-fut    {:param "agent"})
+          (tbl "Scrapers"    @bots-fut     {:param "agent"})
           (append "</div>"))
 
         (append "</body>")
