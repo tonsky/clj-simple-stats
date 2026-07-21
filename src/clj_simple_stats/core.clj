@@ -69,6 +69,48 @@
        (with-open [~sym (connect ~db-path)]
          ~@body))))
 
+(def ^:private conn-ttl-ms
+  (* 5 60 1000))
+
+(def ^:private cache-lock
+  (ReentrantLock.))
+
+(def ^:private *conn-cache
+  "nil | {:conn     <master copy of shared conn>
+          :db-path  <path>
+          :deadline <millis> | nil}"
+  (atom nil))
+
+(defn- acquire-conn
+  "Returns duplicate of cached conn. Initializes cache if needed.
+   Returned value must be closed.
+
+   Idea here is that dashboard keeps conn open for 5 minutes after last access (reset-ttl?),
+   insert-lines! and rollup! can reuse open connection but don't prolong its lifetime"
+  ^DuckDBConnection [db-path & {:keys [reset-ttl?]}]
+  (with-lock cache-lock
+    (when (nil? @*conn-cache)
+      (reset! *conn-cache {:conn (connect db-path), :db-path db-path, :deadline nil}))
+    (if (= db-path (:db-path @*conn-cache))
+      (let [cache @*conn-cache]
+        (when reset-ttl?
+          (swap! *conn-cache assoc :deadline (+ (System/currentTimeMillis) conn-ttl-ms)))
+        (DuckDBConnection/.duplicate (:conn cache)))
+      ;; second database in one process: don't disturb the cache
+      (connect db-path))))
+
+(defn- close-cached-conn! []
+  (with-lock cache-lock
+    (when-some [cache (first (reset-vals! *conn-cache nil))]
+      (log-verbose "Closing" (:db-path cache))
+      (AutoCloseable/.close (:conn cache)))))
+
+(defn- close-cached-conn-if-expired! []
+  (with-lock cache-lock
+    (when-some [{:keys [deadline]} @*conn-cache]
+      (when (or (nil? deadline) (< ^long deadline (System/currentTimeMillis)))
+        (close-cached-conn!)))))
+
 (defn init-db! [^DuckDBConnection conn]
   (log "Initializing" (conn-path conn))
   (with-open [stmt (.createStatement conn)]
@@ -274,33 +316,44 @@
     (finally
       (.setAutoCommit conn true))))
 
+(def ^:private *rollup-dates
+  "db-path -> in-memory mirror of rollup_state.last_date, so worker ticks
+   with a current watermark don't open the database at all. Read from the
+   database once after startup, then maintained in memory"
+  (atom {}))
+
 (defn rollup!
   "Rolls up every completed UTC day after rollup_state.last_date into rollup_daily,
    day by day, then advances the watermark to yesterday"
   [db-path]
-  (with-conn [conn db-path]
-    (let [yesterday (.minusDays (LocalDate/now UTC) 1)
-          last-date (with-open [stmt (.createStatement conn)
-                                rs   (.executeQuery stmt "SELECT last_date FROM rollup_state")]
-                      (when (.next rs)
-                        ^LocalDate (.getObject rs 1)))]
-      (when (and last-date (LocalDate/.isBefore last-date yesterday))
-        (let [dates (with-open [stmt (doto (.prepareStatement conn
-                                             "SELECT DISTINCT date FROM stats WHERE date > ? AND date <= ? ORDER BY date")
-                                       (.setObject 1 last-date)
-                                       (.setObject 2 yesterday))
-                                rs   (.executeQuery stmt)]
-                      (loop [acc []]
-                        (if (.next rs)
-                          (recur (conj acc (.getObject rs 1)))
-                          acc)))]
-          (doseq [date dates]
-            (rollup-day! conn date))
-          ;; advance watermark over trailing empty days too
-          (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
-            (.setObject stmt 1 yesterday)
-            (.execute stmt))
-          (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday)))))))
+  (let [yesterday (.minusDays (LocalDate/now UTC) 1)
+        last-date (get @*rollup-dates db-path)]
+    (when (or (nil? last-date) (LocalDate/.isBefore last-date yesterday))
+      (with-open [conn (acquire-conn db-path)]
+        (let [last-date (or last-date
+                          (with-open [stmt (.createStatement conn)
+                                      rs   (.executeQuery stmt "SELECT last_date FROM rollup_state")]
+                            (when (.next rs)
+                              ^LocalDate (.getObject rs 1))))]
+          (when last-date
+            (when (LocalDate/.isBefore last-date yesterday)
+              (let [dates (with-open [stmt (doto (.prepareStatement conn
+                                                   "SELECT DISTINCT date FROM stats WHERE date > ? AND date <= ? ORDER BY date")
+                                             (.setObject 1 last-date)
+                                             (.setObject 2 yesterday))
+                                      rs   (.executeQuery stmt)]
+                            (loop [acc []]
+                              (if (.next rs)
+                                (recur (conj acc (.getObject rs 1)))
+                                acc)))]
+                (doseq [date dates]
+                  (rollup-day! conn date))
+                ;; advance watermark over trailing empty days too
+                (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
+                  (.setObject stmt 1 yesterday)
+                  (.execute stmt))
+                (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday))))
+            (swap! *rollup-dates assoc db-path yesterday)))))))
 
 (defn rebuild-rollup!
   "Recompute rollup_daily from scratch"
@@ -309,6 +362,7 @@
     (with-open [stmt (.createStatement conn)]
       (.execute stmt "DELETE FROM rollup_daily")
       (.execute stmt "UPDATE rollup_state SET last_date = DATE '1970-01-01'")))
+  (swap! *rollup-dates dissoc db-path)
   (rollup! db-path))
 
 (defn check-db [db-path]
@@ -367,7 +421,7 @@
 
 (defn- insert-lines! [db-path lines]
   (log-verbose "Inserting" (count lines) "lines to" db-path)
-  (with-open [conn (connect db-path)
+  (with-open [conn (acquire-conn db-path)
               apnd (.createAppender conn DuckDBConnection/DEFAULT_SCHEMA "stats")]
     (doseq [lines (partition-all 1000 lines)]
       (doseq [line lines
@@ -393,7 +447,8 @@
     (.cancel ^ScheduledFuture task false)
     (log-verbose "Shut down worker"))
   (when-some [pool (first (reset-vals! *worker-pool nil))]
-    (.shutdown ^ScheduledThreadPoolExecutor pool)))
+    (.shutdown ^ScheduledThreadPoolExecutor pool))
+  (close-cached-conn!))
 
 (defn start-worker! [db-path]
   (log-verbose "Starting worker for" db-path)
@@ -413,7 +468,9 @@
                    ;; queued lines are in stats; no-op while watermark is current
                    (rollup! db-path))
                  (catch Exception e
-                   (log e))))]
+                   (log e))
+                 (finally
+                   (close-cached-conn-if-expired!))))]
     (reset! *worker-pool pool)
     ;; first tick right away: after an upgrade it backfills rollup_daily
     ;; in the background while the site is already serving
@@ -440,7 +497,7 @@
   ([req]
    (render-stats {} req))
   ([{:keys [db-path] :or {db-path default-db-path}} req]
-   (with-conn [conn db-path]
+   (with-open [conn (acquire-conn db-path {:reset-ttl? true})]
      (dashboard/page conn req))))
 
 (defn wrap-render-stats

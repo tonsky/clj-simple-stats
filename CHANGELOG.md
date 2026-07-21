@@ -1,3 +1,8 @@
+# WIP
+
+- Cache DB connection between dashboard accesses
+- More compact `rollup_daily` keeping top 20 per day instead of `daily_counts`
+
 # 1.3.0 - Jul 20, 2026
 
 - Per-day rollup table `daily_counts`
