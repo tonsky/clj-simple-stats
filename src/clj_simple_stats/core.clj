@@ -27,6 +27,14 @@
 (def ^:private default-uri
   "/stats")
 
+(def ^:private rollup-depth
+  "How many values per (date, dim) rollup_daily keeps;
+   the rest are merged into rollup-sentinel"
+  20)
+
+(def ^:private rollup-sentinel
+  dashboard/rollup-sentinel)
+
 (def ^LinkedBlockingQueue queue
   (LinkedBlockingQueue.))
 
@@ -67,7 +75,7 @@
     (.execute stmt
       "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
     (.execute stmt
-      "INSERT INTO version VALUES (3)")
+      "INSERT INTO version VALUES (4)")
     (.execute stmt
       "CREATE TYPE IF NOT EXISTS agent_type_t AS ENUM ('feed', 'bot', 'browser')")
     (.execute stmt
@@ -90,10 +98,12 @@
       "CREATE TYPE IF NOT EXISTS dim_t AS ENUM ('feed', 'bot', 'browser', 'path', 'query', 'ref_domain')")
     (.execute stmt
       ;; Per-day aggregates of stats for all days <= rollup_state.last_date.
-      ;; For dims feed/bot/browser, value is agent (possibly NULL) and cnt is
-      ;; per-day unique visitors weighted by mult. For dims path/query/ref_domain,
-      ;; value is that column and cnt is a plain hit count, type = 'browser' only.
-      "CREATE TABLE IF NOT EXISTS daily_counts (
+      ;; For dims feed/bot/browser, value is agent (possibly NULL).
+      ;; For dims path/query/ref_domain, value is that column.
+      ;; Only the top 20 (rollup-depth) values per (date, dim) are kept;
+      ;; the remainder is merged into one rollup-sentinel row.
+      ;; value NULL -> attribute unknown: counted in timelines, invisible in top-10 tables.
+      "CREATE TABLE IF NOT EXISTS rollup_daily (
          date  DATE,
          dim   dim_t,
          value VARCHAR,
@@ -176,33 +186,82 @@
       "UPDATE version SET version = 3"))
   (log "Migration to version 3 complete"))
 
+(defn migrate-3->4! [^String db-path]
+  (log "Migrating" db-path "to version 4")
+  (with-open [conn (connect db-path)
+              stmt (.createStatement conn)]
+    (.execute stmt "BEGIN TRANSACTION")
+    (.execute stmt
+      (str
+        "CREATE TABLE rollup_daily AS
+           WITH ranked AS (
+             SELECT date, dim, value, cnt,
+                    ROW_NUMBER() OVER (PARTITION BY date, dim ORDER BY cnt DESC, value) AS rn
+             FROM daily_counts
+             WHERE value IS NOT NULL
+           )
+           SELECT date, dim, value, cnt FROM ranked WHERE rn <= " rollup-depth "
+           UNION ALL
+           SELECT date, dim, '" rollup-sentinel "', SUM(cnt)::BIGINT
+           FROM ranked WHERE rn > " rollup-depth " GROUP BY date, dim
+           UNION ALL
+           SELECT date, dim, value, cnt FROM daily_counts WHERE value IS NULL"))
+    (.execute stmt "DROP TABLE daily_counts")
+    (.execute stmt "UPDATE version SET version = 4")
+    (.execute stmt "COMMIT"))
+  (log "Migration to version 4 complete"))
+
 (defn- rollup-day!
-  "Aggregates one day of stats into daily_counts and advances rollup_state to it"
+  "Aggregates one day of stats into rollup_daily and advances rollup_state to it"
   [^DuckDBConnection conn ^LocalDate date]
   (log-verbose "Rolling up" (str date))
   (.setAutoCommit conn false)
   (try
-    (with-open [stmt (.prepareStatement conn "DELETE FROM daily_counts WHERE date = ?")]
+    (with-open [stmt (.prepareStatement conn "DELETE FROM rollup_daily WHERE date = ?")]
       (.setObject stmt 1 date)
       (.execute stmt))
     (with-open [stmt (.prepareStatement conn
-                       "INSERT INTO daily_counts
-                          SELECT date, type::VARCHAR::dim_t, agent, SUM(mult)
-                          FROM (SELECT date, type, ANY_VALUE(agent) AS agent, uniq, MAX(mult) AS mult
-                                FROM stats
-                                WHERE date = ?
-                                GROUP BY date, type, uniq)
-                          GROUP BY date, type, agent")]
+                       (str
+                         "INSERT INTO rollup_daily
+                            WITH agg AS (
+                              SELECT date, type::VARCHAR::dim_t AS dim, agent AS value, SUM(mult) AS cnt
+                              FROM (SELECT date, type, ANY_VALUE(agent) AS agent, uniq, MAX(mult) AS mult
+                                    FROM stats
+                                    WHERE date = ?
+                                    GROUP BY date, type, uniq)
+                              GROUP BY date, type, agent
+                            ),
+                            ranked AS (
+                              SELECT *, ROW_NUMBER() OVER (PARTITION BY dim ORDER BY cnt DESC, value) AS rn
+                              FROM agg
+                              WHERE value IS NOT NULL
+                            )
+                            SELECT date, dim, value, cnt FROM ranked WHERE rn <= " rollup-depth "
+                            UNION ALL
+                            SELECT date, dim, '" rollup-sentinel "', SUM(cnt)
+                            FROM ranked WHERE rn > " rollup-depth " GROUP BY date, dim
+                            UNION ALL
+                            SELECT date, dim, value, cnt FROM agg WHERE value IS NULL"))]
       (.setObject stmt 1 date)
       (.execute stmt))
     (doseq [dim ["path" "query" "ref_domain"]]
       (with-open [stmt (.prepareStatement conn
                          (str
-                           "INSERT INTO daily_counts
-                              SELECT date, '" dim "', " dim ", COUNT(*)
-                              FROM stats
-                              WHERE date = ? AND type = 'browser' AND " dim " IS NOT NULL
-                              GROUP BY date, " dim))]
+                           "INSERT INTO rollup_daily
+                              WITH agg AS (
+                                SELECT date, " dim " AS value, COUNT(*) AS cnt
+                                FROM stats
+                                WHERE date = ? AND type = 'browser' AND " dim " IS NOT NULL
+                                GROUP BY date, " dim "
+                              ),
+                              ranked AS (
+                                SELECT *, ROW_NUMBER() OVER (ORDER BY cnt DESC, value) AS rn
+                                FROM agg
+                              )
+                              SELECT date, '" dim "', value, cnt FROM ranked WHERE rn <= " rollup-depth "
+                              UNION ALL
+                              SELECT date, '" dim "', '" rollup-sentinel "', SUM(cnt)
+                              FROM ranked WHERE rn > " rollup-depth " GROUP BY date"))]
         (.setObject stmt 1 date)
         (.execute stmt)))
     (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
@@ -216,7 +275,7 @@
       (.setAutoCommit conn true))))
 
 (defn rollup!
-  "Rolls up every completed UTC day after rollup_state.last_date into daily_counts,
+  "Rolls up every completed UTC day after rollup_state.last_date into rollup_daily,
    day by day, then advances the watermark to yesterday"
   [db-path]
   (with-conn [conn db-path]
@@ -244,11 +303,11 @@
           (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday)))))))
 
 (defn rebuild-rollup!
-  "Recompute daily_counts from scratch"
+  "Recompute rollup_daily from scratch"
   [db-path]
   (with-conn [conn db-path]
     (with-open [stmt (.createStatement conn)]
-      (.execute stmt "DELETE FROM daily_counts")
+      (.execute stmt "DELETE FROM rollup_daily")
       (.execute stmt "UPDATE rollup_state SET last_date = DATE '1970-01-01'")))
   (rollup! db-path))
 
@@ -261,7 +320,9 @@
       (when (<= v 1)
         (migrate-1->2! db-path))
       (when (<= v 2)
-        (migrate-2->3! db-path)))))
+        (migrate-2->3! db-path))
+      (when (<= v 3)
+        (migrate-3->4! db-path)))))
 
 (def ^:private *worker-pool
   (atom nil))
@@ -354,7 +415,7 @@
                  (catch Exception e
                    (log e))))]
     (reset! *worker-pool pool)
-    ;; first tick right away: after an upgrade it backfills daily_counts
+    ;; first tick right away: after an upgrade it backfills rollup_daily
     ;; in the background while the site is already serving
     (reset! *worker-task (.scheduleAtFixedRate pool ^Runnable task 0 1 TimeUnit/MINUTES))))
 

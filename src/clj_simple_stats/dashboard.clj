@@ -18,6 +18,13 @@
 (def ^:private ^DateTimeFormatter year-month-formatter
   (DateTimeFormatter/ofPattern "yyyy-MM"))
 
+(def rollup-sentinel
+  "Sentinel value in rollup_daily: aggregate of a day's values that didn't make
+   the per-day top rollup-depth. Excluded from top-10 ranking, counted into Others;
+   value NULL means the attribute is unknown and is excluded from both.
+   Defined here rather than in core because core depends on this ns"
+  "<Others>")
+
 (defn filter->where [f]
   (str/join " AND "
     (for [[col op _] f]
@@ -156,13 +163,13 @@
     #_(top-10 conn "query" "path = '/search' AND type = 'browser'")))
 
 ;; Rollup variants: used when no filters except from/to are set. Closed days come
-;; from daily_counts, days after rollup_state.last_date (i.e. today) from stats.
+;; from rollup_daily, days after rollup_state.last_date (i.e. today) from stats.
 
 (defn visits-by-type+date-rollup [conn from to]
   (->
     (query
       "SELECT dim::VARCHAR AS type, date, SUM(cnt) AS cnt
-       FROM daily_counts
+       FROM rollup_daily
        WHERE dim IN ('browser', 'feed', 'bot') AND date >= ? AND date <= ?
        GROUP BY dim, date
        UNION ALL
@@ -186,7 +193,7 @@
     (query
       (str
         "WITH counts AS (
-           SELECT value, cnt FROM daily_counts
+           SELECT value, cnt FROM rollup_daily
            WHERE dim = '" what "' AND date >= ? AND date <= ?
            UNION ALL
            SELECT " what " AS value, COUNT(*) AS cnt
@@ -198,7 +205,7 @@
          top_values AS (
            SELECT value, SUM(cnt) AS count
            FROM counts
-           WHERE value IS NOT NULL
+           WHERE value IS NOT NULL AND value <> '" rollup-sentinel "'
            GROUP BY value
          ),
          top_n AS (
@@ -210,9 +217,10 @@
          others AS (
            SELECT
              NULL AS value,
-             SUM(count) AS count
-           FROM top_values
-           WHERE value NOT IN (SELECT value FROM top_n)
+             (SELECT COALESCE(SUM(count), 0) FROM top_values
+              WHERE value NOT IN (SELECT value FROM top_n))
+           + (SELECT COALESCE(SUM(cnt), 0) FROM counts
+              WHERE value = '" rollup-sentinel "') AS count
          )
          FROM top_n
          UNION ALL
@@ -229,7 +237,7 @@
     (query
       (str
         "WITH counts AS (
-           SELECT value, cnt FROM daily_counts
+           SELECT value, cnt FROM rollup_daily
            WHERE dim = '" type "' AND date >= ? AND date <= ?
            UNION ALL
            SELECT ANY_VALUE(agent) AS value, MAX(mult) AS cnt
@@ -241,7 +249,7 @@
          top_values AS (
            SELECT value, SUM(cnt) AS count
            FROM counts
-           WHERE value IS NOT NULL
+           WHERE value IS NOT NULL AND value <> '" rollup-sentinel "'
            GROUP BY value
          ),
          top_n AS (
@@ -253,9 +261,10 @@
          others AS (
            SELECT
              NULL AS value,
-             SUM(count) AS count
-           FROM top_values
-           WHERE value NOT IN (SELECT value FROM top_n)
+             (SELECT COALESCE(SUM(count), 0) FROM top_values
+              WHERE value NOT IN (SELECT value FROM top_n))
+           + (SELECT COALESCE(SUM(cnt), 0) FROM counts
+              WHERE value = '" rollup-sentinel "') AS count
          )
          FROM top_n
          UNION ALL
