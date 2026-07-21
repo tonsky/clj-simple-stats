@@ -1,4 +1,4 @@
-:root { --padding-body: 20px; --padding-graph_outer: 10px; --width-graph_legend: 20px; }
+:root { --padding-body: 20px; --padding-graph_outer: 10px; --width-graph_legend: 30px; }
 body { margin: 0; padding: 20px var(--padding-body); background: #EDEDF2; font-family: 'Inter', sans-serif; font-optical-sizing: auto; }
 a { color: inherit; text-decoration-color: #00000040; }
 a:hover { text-decoration-color: #000000; }

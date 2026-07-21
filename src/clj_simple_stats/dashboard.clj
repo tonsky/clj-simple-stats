@@ -535,7 +535,7 @@
             (append "<svg class=graph_legend height=" (+ graph-h 30) ">")
             (doseq [val (range 0 (inc max-val) hrz-step)
                     :let [bar-h (bar-h val)]]
-              (append "<text x=20 y=" (- graph-h bar-h -13) " text-anchor=end>" (format-num val) "</text>"))
+              (append "<text x=30 y=" (- graph-h bar-h -13) " text-anchor=end>" (format-num val) "</text>"))
             (append "</svg>") ;; .graph_legend
 
             (append "<div class=graph_hover style='display: none'></div>")
