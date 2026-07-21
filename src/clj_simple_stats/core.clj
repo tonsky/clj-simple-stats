@@ -117,7 +117,7 @@
     (.execute stmt
       "CREATE TABLE IF NOT EXISTS version (version INTEGER)")
     (.execute stmt
-      "INSERT INTO version VALUES (4)")
+      "INSERT INTO version VALUES (5)")
     (.execute stmt
       "CREATE TYPE IF NOT EXISTS agent_type_t AS ENUM ('feed', 'bot', 'browser')")
     (.execute stmt
@@ -139,7 +139,7 @@
     (.execute stmt
       "CREATE TYPE IF NOT EXISTS dim_t AS ENUM ('feed', 'bot', 'browser', 'path', 'query', 'ref_domain')")
     (.execute stmt
-      ;; Per-day aggregates of stats for all days <= rollup_state.last_date.
+      ;; Per-day aggregates of stats for all completed days.
       ;; For dims feed/bot/browser, value is agent (possibly NULL).
       ;; For dims path/query/ref_domain, value is that column.
       ;; Only the top 20 (rollup-depth) values per (date, dim) are kept;
@@ -150,11 +150,7 @@
          dim   dim_t,
          value VARCHAR,
          cnt   BIGINT
-       )")
-    (.execute stmt
-      "CREATE TABLE IF NOT EXISTS rollup_state (last_date DATE)")
-    (.execute stmt
-      "INSERT INTO rollup_state VALUES (DATE '1970-01-01')")))
+       )")))
 
 (defn db-version ^long [^DuckDBConnection conn]
   (or
@@ -232,29 +228,27 @@
   (log "Migrating" db-path "to version 4")
   (with-open [conn (connect db-path)
               stmt (.createStatement conn)]
-    (.execute stmt "BEGIN TRANSACTION")
+    (.execute stmt "DROP TABLE IF EXISTS daily_counts")
     (.execute stmt
-      (str
-        "CREATE TABLE rollup_daily AS
-           WITH ranked AS (
-             SELECT date, dim, value, cnt,
-                    ROW_NUMBER() OVER (PARTITION BY date, dim ORDER BY cnt DESC, value) AS rn
-             FROM daily_counts
-             WHERE value IS NOT NULL
-           )
-           SELECT date, dim, value, cnt FROM ranked WHERE rn <= " rollup-depth "
-           UNION ALL
-           SELECT date, dim, '" rollup-sentinel "', SUM(cnt)::BIGINT
-           FROM ranked WHERE rn > " rollup-depth " GROUP BY date, dim
-           UNION ALL
-           SELECT date, dim, value, cnt FROM daily_counts WHERE value IS NULL"))
-    (.execute stmt "DROP TABLE daily_counts")
-    (.execute stmt "UPDATE version SET version = 4")
-    (.execute stmt "COMMIT"))
+      "CREATE TABLE IF NOT EXISTS rollup_daily (
+         date  DATE,
+         dim   dim_t,
+         value VARCHAR,
+         cnt   BIGINT
+       )")
+    (.execute stmt "UPDATE version SET version = 4"))
   (log "Migration to version 4 complete"))
 
+(defn migrate-4->5! [^String db-path]
+  (log "Migrating" db-path "to version 5")
+  (with-open [conn (connect db-path)
+              stmt (.createStatement conn)]
+    (.execute stmt "DROP TABLE IF EXISTS rollup_state")
+    (.execute stmt "UPDATE version SET version = 5"))
+  (log "Migration to version 5 complete"))
+
 (defn- rollup-day!
-  "Aggregates one day of stats into rollup_daily and advances rollup_state to it"
+  "Aggregates one day of stats into rollup_daily"
   [^DuckDBConnection conn ^LocalDate date]
   (log-verbose "Rolling up" (str date))
   (.setAutoCommit conn false)
@@ -306,9 +300,6 @@
                               FROM ranked WHERE rn > " rollup-depth " GROUP BY date"))]
         (.setObject stmt 1 date)
         (.execute stmt)))
-    (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
-      (.setObject stmt 1 date)
-      (.execute stmt))
     (.commit conn)
     (catch Throwable t
       (.rollback conn)
@@ -317,14 +308,12 @@
       (.setAutoCommit conn true))))
 
 (def ^:private *rollup-dates
-  "db-path -> in-memory mirror of rollup_state.last_date, so worker ticks
-   with a current watermark don't open the database at all. Read from the
-   database once after startup, then maintained in memory"
+  "db-path -> last rolluped up day"
   (atom {}))
 
 (defn rollup!
-  "Rolls up every completed UTC day after rollup_state.last_date into rollup_daily,
-   day by day, then advances the watermark to yesterday"
+  "Rolls up every completed UTC day after the watermark into rollup_daily,
+   day by day. The persistent watermark is MAX(date) in rollup_daily"
   [db-path]
   (let [yesterday (.minusDays (LocalDate/now UTC) 1)
         last-date (get @*rollup-dates db-path)]
@@ -332,36 +321,30 @@
       (with-open [conn (acquire-conn db-path)]
         (let [last-date (or last-date
                           (with-open [stmt (.createStatement conn)
-                                      rs   (.executeQuery stmt "SELECT last_date FROM rollup_state")]
+                                      rs   (.executeQuery stmt "SELECT COALESCE(MAX(date), DATE '1970-01-01') FROM rollup_daily")]
                             (when (.next rs)
                               ^LocalDate (.getObject rs 1))))]
-          (when last-date
-            (when (LocalDate/.isBefore last-date yesterday)
-              (let [dates (with-open [stmt (doto (.prepareStatement conn
-                                                   "SELECT DISTINCT date FROM stats WHERE date > ? AND date <= ? ORDER BY date")
-                                             (.setObject 1 last-date)
-                                             (.setObject 2 yesterday))
-                                      rs   (.executeQuery stmt)]
-                            (loop [acc []]
-                              (if (.next rs)
-                                (recur (conj acc (.getObject rs 1)))
-                                acc)))]
-                (doseq [date dates]
-                  (rollup-day! conn date))
-                ;; advance watermark over trailing empty days too
-                (with-open [stmt (.prepareStatement conn "UPDATE rollup_state SET last_date = ?")]
-                  (.setObject stmt 1 yesterday)
-                  (.execute stmt))
-                (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday))))
-            (swap! *rollup-dates assoc db-path yesterday)))))))
+          (when (LocalDate/.isBefore last-date yesterday)
+            (let [dates (with-open [stmt (doto (.prepareStatement conn
+                                                 "SELECT DISTINCT date FROM stats WHERE date > ? AND date <= ? ORDER BY date")
+                                           (.setObject 1 last-date)
+                                           (.setObject 2 yesterday))
+                                    rs   (.executeQuery stmt)]
+                          (loop [acc []]
+                            (if (.next rs)
+                              (recur (conj acc (.getObject rs 1)))
+                              acc)))]
+              (doseq [date dates]
+                (rollup-day! conn date))
+              (log-verbose "Rolled up" (count dates) "day(s), watermark at" (str yesterday))))
+          (swap! *rollup-dates assoc db-path yesterday))))))
 
 (defn rebuild-rollup!
   "Recompute rollup_daily from scratch"
   [db-path]
   (with-conn [conn db-path]
     (with-open [stmt (.createStatement conn)]
-      (.execute stmt "DELETE FROM rollup_daily")
-      (.execute stmt "UPDATE rollup_state SET last_date = DATE '1970-01-01'")))
+      (.execute stmt "DELETE FROM rollup_daily")))
   (swap! *rollup-dates dissoc db-path)
   (rollup! db-path))
 
@@ -376,7 +359,9 @@
       (when (<= v 2)
         (migrate-2->3! db-path))
       (when (<= v 3)
-        (migrate-3->4! db-path)))))
+        (migrate-3->4! db-path))
+      (when (<= v 4)
+        (migrate-4->5! db-path)))))
 
 (def ^:private *worker-pool
   (atom nil))

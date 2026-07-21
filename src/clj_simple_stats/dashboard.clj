@@ -163,7 +163,9 @@
     #_(top-10 conn "query" "path = '/search' AND type = 'browser'")))
 
 ;; Rollup variants: used when no filters except from/to are set. Closed days come
-;; from rollup_daily, days after rollup_state.last_date (i.e. today) from stats.
+;; from rollup_daily, days after its MAX(date) watermark (i.e. today) from stats.
+;; The watermark is derived inside the query so both parts see one consistent
+;; snapshot even if a rollup commits mid-render.
 
 (defn visits-by-type+date-rollup [conn from to]
   (->
@@ -176,7 +178,7 @@
        SELECT type::VARCHAR, date, SUM(mult)
        FROM (SELECT type, date, uniq, MAX(mult) AS mult
              FROM stats
-             WHERE date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+             WHERE date > (SELECT COALESCE(MAX(date), DATE '1970-01-01') FROM rollup_daily) AND date >= ? AND date <= ?
              GROUP BY type, date, uniq)
        GROUP BY type, date"
       [from to from to]
@@ -199,7 +201,7 @@
            SELECT " what " AS value, COUNT(*) AS cnt
            FROM stats
            WHERE type = 'browser' AND " what " IS NOT NULL
-             AND date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+             AND date > (SELECT COALESCE(MAX(date), DATE '1970-01-01') FROM rollup_daily) AND date >= ? AND date <= ?
            GROUP BY " what "
          ),
          top_values AS (
@@ -243,7 +245,7 @@
            SELECT ANY_VALUE(agent) AS value, MAX(mult) AS cnt
            FROM stats
            WHERE type = '" type "'
-             AND date > (SELECT last_date FROM rollup_state) AND date >= ? AND date <= ?
+             AND date > (SELECT COALESCE(MAX(date), DATE '1970-01-01') FROM rollup_daily) AND date >= ? AND date <= ?
            GROUP BY date, uniq
          ),
          top_values AS (
